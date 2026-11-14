@@ -7,6 +7,7 @@ import com.example.domain.DataSourceOrigin
 import com.example.domain.HealthSeverity
 import com.example.domain.ThermalParser
 import com.example.domain.ThermalTelemetry
+import com.example.domain.ThermalTripPoint
 import com.example.domain.ThermalZoneCategory
 import com.example.domain.ThermalZoneReading
 import kotlinx.coroutines.Dispatchers
@@ -31,7 +32,13 @@ class ThermalDataSource(
         val zoneNames = entries.filter { it.startsWith("thermal_zone") }
             .sortedBy { it.removePrefix("thermal_zone").toIntOrNull() ?: Int.MAX_VALUE }
 
-        val thermalFiles = listOf("type", "temp", "mode", "policy")
+        val thermalFiles = listOf(
+            "type", "temp", "mode", "policy",
+            "trip_point_0_temp", "trip_point_0_type",
+            "trip_point_1_temp", "trip_point_1_type",
+            "trip_point_2_temp", "trip_point_2_type",
+            "trip_point_3_temp", "trip_point_3_type"
+        )
         val batch = sysfsReader.preloadBatchForRoot(
             zoneNames.flatMap { zn -> thermalFiles.map { f -> "$baseDir/$zn/$f" } }
         )
@@ -54,6 +61,18 @@ class ThermalDataSource(
             val policyRes = batch["$zonePath/policy"]
             if (policyRes?.usedRoot == true) usedRoot = true
 
+            val tripPoints = (0..3).mapNotNull { idx ->
+                val tpTempRes = batch["$zonePath/trip_point_${idx}_temp"]
+                val tpTypeRes = batch["$zonePath/trip_point_${idx}_type"]
+                if (tpTempRes?.usedRoot == true || tpTypeRes?.usedRoot == true) usedRoot = true
+                val tpRaw = tpTempRes?.content?.trim()?.toLongOrNull()
+                val tpTempC = tpRaw?.let { ThermalParser.parseTemperatureCelsius(it)?.celsius }
+                val tpType = tpTypeRes?.content?.trim()?.takeIf { it.isNotBlank() }
+                if (tpTempC != null || tpType != null) {
+                    ThermalTripPoint(index = idx, type = tpType, tempCelsius = tpTempC)
+                } else null
+            }
+
             val category = ThermalParser.classifyZone(typeStr)
             val parsed = rawTemp?.let { ThermalParser.parseTemperatureCelsius(it) }
             val severity = ThermalParser.evaluateZoneSeverity(category, parsed?.celsius)
@@ -69,7 +88,8 @@ class ThermalDataSource(
                 mode = modeRes?.content,
                 policy = policyRes?.content,
                 source = sysfsReader.resolveSource(DataSourceOrigin.SYSFS_THERMAL, usedRoot),
-                severity = severity
+                severity = severity,
+                tripPoints = tripPoints
             )
         }
 

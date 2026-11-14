@@ -22,7 +22,9 @@ enum class DataSourceOrigin(val label: String) {
     ACTIVITY_MANAGER("Android ActivityManager"),
     STAT_FS("Android StatFs"),
     SYSFS_BLOCK("Sysfs block"),
+    SYSFS_MMC("Sysfs JEDEC eMMC"),
     SENSOR_MANAGER("Android SensorManager"),
+    DISPLAY_MANAGER("Android Display"),
     ROOT_KERNEL_INTERFACE("Root-accessible kernel interface"),
     SYSTEM_BUILD("Android Build / OS"),
     UNAVAILABLE("Unavailable")
@@ -77,6 +79,8 @@ data class PowerSupplyNodeInfo(
     val cycleCount: Int?,
     val voltageMaxMv: Double?,
     val currentMaxMa: Double?,
+    val chargeType: String? = null,
+    val resistanceMohm: Double? = null,
     val sourceOrigin: DataSourceOrigin
 )
 
@@ -104,7 +108,12 @@ data class BatteryTelemetry(
     val cycleCount: SourcedValue<Int>,
     val estimatedHealth: BatteryHealthEstimation?,
     val detectedPowerSupplies: List<PowerSupplyNodeInfo>,
-    val severity: HealthSeverity
+    val severity: HealthSeverity,
+    val chargeType: SourcedValue<String> = SourcedValue(null, "", DataSourceOrigin.UNAVAILABLE),
+    val internalResistanceMohm: SourcedValue<Double> = SourcedValue(null, "mΩ", DataSourceOrigin.UNAVAILABLE),
+    val voltageMaxDesignMv: SourcedValue<Double> = SourcedValue(null, "mV", DataSourceOrigin.UNAVAILABLE),
+    val drainOrChargeRatePctPerHour: Double? = null,
+    val estimatedTimeLabel: String? = null
 )
 
 data class ChargingSessionRecord(
@@ -144,6 +153,12 @@ enum class ThermalZoneCategory(val label: String) {
     OTHER("Other")
 }
 
+data class ThermalTripPoint(
+    val index: Int,
+    val type: String?,
+    val tempCelsius: Double?
+)
+
 data class ThermalZoneReading(
     val zoneName: String,
     val path: String,
@@ -155,7 +170,8 @@ data class ThermalZoneReading(
     val mode: String?,
     val policy: String?,
     val source: DataSourceOrigin,
-    val severity: HealthSeverity
+    val severity: HealthSeverity,
+    val tripPoints: List<ThermalTripPoint> = emptyList()
 )
 
 data class ThermalTelemetry(
@@ -170,6 +186,18 @@ data class ThermalTelemetry(
     val osThermalStatusLabel: String,
     val osThermalHeadroom: Float?,
     val overallSeverity: HealthSeverity
+)
+
+data class CpuFrequencyResidency(
+    val freqMhz: Double,
+    val timeMs: Long,
+    val percent: Double
+)
+
+data class CpuTimeInStateCluster(
+    val clusterName: String,
+    val sourcePath: String,
+    val entries: List<CpuFrequencyResidency>
 )
 
 data class CpuCoreTelemetry(
@@ -197,7 +225,12 @@ data class CpuTelemetry(
     val cores: List<CpuCoreTelemetry>,
     val availableGovernors: List<String>,
     val availableFrequenciesMhz: List<Double>,
-    val source: DataSourceOrigin
+    val source: DataSourceOrigin,
+    val totalElapsedMs: Long = 0L,
+    val awakeUptimeMs: Long = 0L,
+    val deepSleepMs: Long = 0L,
+    val deepSleepPercent: Double = 0.0,
+    val timeInStateClusters: List<CpuTimeInStateCluster> = emptyList()
 )
 
 data class GpuTelemetry(
@@ -229,7 +262,14 @@ data class MemoryTelemetry(
     val isLowMemory: Boolean,
     val thresholdBytes: Long,
     val interpretation: String,
-    val sources: List<DataSourceOrigin>
+    val sources: List<DataSourceOrigin>,
+    val dirtyBytes: Long? = null,
+    val slabBytes: Long? = null,
+    val pageTablesBytes: Long? = null,
+    val zramOrigDataBytes: Long? = null,
+    val zramComprDataBytes: Long? = null,
+    val zramMemUsedBytes: Long? = null,
+    val zramCompressionRatio: Double? = null
 )
 
 data class MountPointInfo(
@@ -244,6 +284,26 @@ data class BlockDeviceInfo(
     val sizeBytes: Long?,
     val rotational: Boolean?,
     val scheduler: String?,
+    val source: DataSourceOrigin
+)
+
+data class PartitionInfo(
+    val major: Int,
+    val minor: Int,
+    val blocksKb: Long,
+    val name: String
+)
+
+data class EmmcHardwareHealth(
+    val deviceName: String?,
+    val manfId: String?,
+    val oemId: String?,
+    val hwRev: String?,
+    val fwRev: String?,
+    val lifeTimeTypeA: String?,
+    val lifeTimeTypeB: String?,
+    val preEolStatus: String?,
+    val preEolSeverity: HealthSeverity,
     val source: DataSourceOrigin
 )
 
@@ -264,7 +324,9 @@ data class StorageTelemetry(
     val mounts: List<MountPointInfo>,
     val blockDevices: List<BlockDeviceInfo>,
     val diagnosticNote: String,
-    val lastBenchmark: StorageBenchmarkResult? = null
+    val lastBenchmark: StorageBenchmarkResult? = null,
+    val partitions: List<PartitionInfo> = emptyList(),
+    val emmcHealth: EmmcHardwareHealth? = null
 )
 
 data class HardwareSensorMetadata(
@@ -290,6 +352,22 @@ data class LiveSensorSample(
     val timestampNs: Long
 )
 
+data class KernelTunableItem(
+    val label: String,
+    val path: String,
+    val value: String?,
+    val source: DataSourceOrigin
+)
+
+data class DisplayTelemetry(
+    val widthPx: Int,
+    val heightPx: Int,
+    val densityDpi: Int,
+    val refreshRateHz: Float,
+    val supportedRefreshRatesHz: List<Float>,
+    val isHdrCapable: Boolean
+)
+
 data class KernelSystemInfo(
     val deviceModel: String,
     val manufacturer: String,
@@ -309,7 +387,9 @@ data class KernelSystemInfo(
     val magiskVersion: String?,
     val availableGovernors: List<String>,
     val availableCpuFrequenciesMhz: List<Double>,
-    val thermalConfigPreview: String?
+    val thermalConfigPreview: String?,
+    val tunables: List<KernelTunableItem> = emptyList(),
+    val displayInfo: DisplayTelemetry? = null
 )
 
 data class DiagnosticCheckResult(

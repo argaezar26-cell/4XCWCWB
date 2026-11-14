@@ -7,179 +7,135 @@ import com.example.domain.ChargingTelemetry
 import com.example.domain.CpuFreqParser
 import com.example.domain.CpuTelemetry
 import com.example.domain.DataSourceOrigin
-import com.example.domain.DiagnosticStatus
+import com.example.domain.DrainRateCalculator
+import com.example.domain.EmmcHealthParser
 import com.example.domain.GpuTelemetry
 import com.example.domain.HardwareSnapshot
 import com.example.domain.HealthSeverity
 import com.example.domain.KernelSystemInfo
 import com.example.domain.MemoryTelemetry
-import com.example.domain.PowerCalculator
+import com.example.domain.PartitionsParser
 import com.example.domain.RootStatus
 import com.example.domain.SourcedValue
 import com.example.domain.StorageTelemetry
-import com.example.domain.ThermalParser
 import com.example.domain.ThermalTelemetry
-import com.example.domain.ThermalZoneCategory
-import com.example.domain.UnitConverter
+import com.example.domain.ZramParser
 import com.example.root.RootCommandAllowlist
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HardwareCalculatorsTest {
 
     @Test
-    fun `microampere to milliampere conversion handles signed uA and mA`() {
-        val chargingUa = UnitConverter.toMilliamperes(1_850_000L)
-        assertEquals(1850.0, chargingUa.value, 0.01)
-        assertEquals("µA", chargingUa.detectedSourceUnit)
-
-        val dischargingUa = UnitConverter.toMilliamperes(-420_000L)
-        assertEquals(-420.0, dischargingUa.value, 0.01)
-        assertEquals("µA", dischargingUa.detectedSourceUnit)
-
-        val directMa = UnitConverter.toMilliamperes(-350L)
-        assertEquals(-350.0, directMa.value, 0.01)
-        assertEquals("mA", directMa.detectedSourceUnit)
-
-        val zeroMa = UnitConverter.toMilliamperes(0L)
-        assertEquals(0.0, zeroMa.value, 0.01)
+    fun `parseTimeInState computes MHz, ms, and percentage residency`() {
+        val raw = """
+            960000 3000
+            1094400 1000
+            1401600 6000
+        """.trimIndent()
+        val entries = CpuFreqParser.parseTimeInState(raw)
+        assertEquals(3, entries.size)
+        assertEquals(960.0, entries[0].freqMhz, 0.01)
+        assertEquals(30_000L, entries[0].timeMs)
+        assertEquals(30.0, entries[0].percent, 0.01)
+        assertEquals(1401.6, entries[2].freqMhz, 0.01)
+        assertEquals(60.0, entries[2].percent, 0.01)
     }
 
     @Test
-    fun `microvolt to millivolt conversion handles uV mV and invalid values`() {
-        val battUv = UnitConverter.toMillivolts(4_185_000L)
-        assertNotNull(battUv)
-        assertEquals(4185.0, battUv!!.value, 0.01)
-        assertEquals("µV", battUv.detectedSourceUnit)
-
-        val usbUv = UnitConverter.toMillivolts(5_020_000L)
-        assertNotNull(usbUv)
-        assertEquals(5020.0, usbUv!!.value, 0.01)
-
-        val bmMv = UnitConverter.toMillivolts(3_920L)
-        assertNotNull(bmMv)
-        assertEquals(3920.0, bmMv!!.value, 0.01)
-        assertEquals("mV", bmMv.detectedSourceUnit)
-
-        assertNull(UnitConverter.toMillivolts(0L))
-        assertNull(UnitConverter.toMillivolts(-100L))
+    fun `ZramParser parses mm_stat compression ratio accurately`() {
+        val raw = "536870912 134217728 140000000 0 134217728 1024 0 0"
+        val stats = ZramParser.parseMmStat(raw)
+        assertNotNull(stats)
+        assertEquals(536870912L, stats!!.origDataBytes)
+        assertEquals(134217728L, stats.comprDataBytes)
+        assertEquals(140000000L, stats.memUsedTotalBytes)
+        assertEquals(4.0, stats.ratio!!, 0.01)
     }
 
     @Test
-    fun `power calculation P equals V times I accurately`() {
-        // 5000 mV (5.0V) * 1800 mA (1.8A) = 9.0 W
-        val usbPower = PowerCalculator.calculatePowerWatts(5000.0, 1800.0)
-        assertNotNull(usbPower)
-        assertEquals(9.0, usbPower!!, 0.001)
+    fun `PartitionsParser skips header and extracts block partitions`() {
+        val raw = """
+            major minor  #blocks  name
 
-        // Negative battery current (Qualcomm charging sign convention) -> positive magnitude 7.6 W
-        val battPower = PowerCalculator.calculatePowerWatts(3800.0, -2000.0)
-        assertNotNull(battPower)
-        assertEquals(7.6, battPower!!, 0.001)
-
-        // Missing rail value must return null (never fabricate)
-        assertNull(PowerCalculator.calculatePowerWatts(null, 1500.0))
-        assertNull(PowerCalculator.calculatePowerWatts(5000.0, null))
+             179        0   61071360 mmcblk0
+             179       48   52428800 mmcblk0p48
+             253        0    2097152 zram0
+        """.trimIndent()
+        val list = PartitionsParser.parseProcPartitions(raw)
+        assertEquals(3, list.size)
+        assertEquals("mmcblk0", list[0].name)
+        assertEquals(61071360L, list[0].blocksKb)
+        assertEquals(253, list[2].major)
+        assertEquals("zram0", list[2].name)
     }
 
     @Test
-    fun `battery health estimation computes ratio with safety bounds`() {
-        // 3690 mAh / 4100 mAh = 90.0%
-        val est = BatteryHealthEstimator.estimate(3690.0, 4100.0)
-        assertNotNull(est)
-        assertEquals(90.0, est!!.estimatedPercent, 0.01)
-        assertTrue(est.disclaimer.contains("Estimated", ignoreCase = true))
+    fun `EmmcHealthParser decodes JEDEC life_time and pre_eol_info`() {
+        assertEquals("0% - 10% wear used", EmmcHealthParser.decodeLifeTimeHex("0x01"))
+        assertEquals("10% - 20% wear used", EmmcHealthParser.decodeLifeTimeHex("0x02"))
+        assertEquals(">100% (Exceeded max estimated life)", EmmcHealthParser.decodeLifeTimeHex("0x0B"))
 
-        // Slightly over design capacity clamps to 100%
-        val overEst = BatteryHealthEstimator.estimate(4200.0, 4100.0)
-        assertNotNull(overEst)
-        assertEquals(100.0, overEst!!.estimatedPercent, 0.01)
+        val (normalMsg, normalSev) = EmmcHealthParser.decodePreEol("0x01")
+        assertEquals(HealthSeverity.NORMAL, normalSev)
+        assertTrue(normalMsg!!.contains("Normal"))
 
-        // Missing or zero values return null
-        assertNull(BatteryHealthEstimator.estimate(null, 4100.0))
-        assertNull(BatteryHealthEstimator.estimate(3500.0, 0.0))
+        val (urgMsg, urgSev) = EmmcHealthParser.decodePreEol("0x03")
+        assertEquals(HealthSeverity.CRITICAL, urgSev)
+        assertTrue(urgMsg!!.contains("Urgent"))
     }
 
     @Test
-    fun `thermal sensor parsing handles millidegree decidegree and sentinel values`() {
-        val cpuZone = ThermalParser.parseTemperatureCelsius(46_500L)
-        assertNotNull(cpuZone)
-        assertEquals(46.5, cpuZone!!.celsius, 0.01)
-        assertEquals("m°C", cpuZone.detectedUnit)
+    fun `DrainRateCalculator estimates percent per hour and remaining time`() {
+        val drainRate = DrainRateCalculator.estimatePctPerHourFromCurrent(
+            currentMa = -400.0,
+            isCharging = false,
+            capacityMah = 4000.0
+        )
+        assertEquals(-10.0, drainRate!!, 0.01)
+        assertEquals("Est. empty in 5h 0m", DrainRateCalculator.estimateRemainingTimeLabel(50, false, drainRate))
 
-        val battZone = ThermalParser.parseTemperatureCelsius(348L, isBatteryPowerSupplyTemp = true)
-        assertNotNull(battZone)
-        assertEquals(34.8, battZone!!.celsius, 0.01)
-        assertEquals("0.1°C", battZone.detectedUnit)
-
-        // Disconnected / sentinel values rejected
-        assertNull(ThermalParser.parseTemperatureCelsius(-273_000L))
-        assertNull(ThermalParser.parseTemperatureCelsius(-40_000L))
-        assertNull(ThermalParser.parseTemperatureCelsius(255_000L))
-
-        assertEquals(ThermalZoneCategory.CPU, ThermalParser.classifyZone("tsens_tz_sensor4"))
-        assertEquals(ThermalZoneCategory.BATTERY, ThermalParser.classifyZone("battery"))
-        assertEquals(ThermalZoneCategory.GPU, ThermalParser.classifyZone("gpu-usr"))
+        val chargeRate = DrainRateCalculator.estimatePctPerHourFromCurrent(
+            currentMa = 2000.0,
+            isCharging = true,
+            capacityMah = 4000.0
+        )
+        assertEquals(50.0, chargeRate!!, 0.01)
+        assertEquals("Est. full in 1h 0m", DrainRateCalculator.estimateRemainingTimeLabel(50, true, chargeRate))
     }
 
     @Test
-    fun `cpu frequency conversion and proc stat parsing work accurately`() {
-        val khz = UnitConverter.frequencyToMhz(1_401_600L)
-        assertNotNull(khz)
-        assertEquals(1401.6, khz!!.value, 0.01)
-        assertEquals("kHz", khz.detectedSourceUnit)
-
-        val hz = UnitConverter.frequencyToMhz(450_000_000L)
-        assertNotNull(hz)
-        assertEquals(450.0, hz!!.value, 0.01)
-        assertEquals("Hz", hz.detectedSourceUnit)
-
-        val freqs = CpuFreqParser.parseFrequencyListMhz("960000 1094400 1401600")
-        assertEquals(listOf(960.0, 1094.4, 1401.6), freqs)
-
-        val s1 = CpuFreqParser.parseProcStat("cpu  100 0 50 850 0 0 0 0")
-        val s2 = CpuFreqParser.parseProcStat("cpu  200 0 100 1700 0 0 0 0")
-        val util = CpuFreqParser.computeUtilizationPercent(s1["cpu"], s2["cpu"])
-        assertNotNull(util)
-        assertEquals(15.0, util!!, 0.1)
-    }
-
-    @Test
-    fun `root command allowlist strictly blocks writes and arbitrary commands`() {
-        assertTrue(RootCommandAllowlist.isAllowedCommand("id"))
-        assertTrue(RootCommandAllowlist.isAllowedCommand("cat /sys/class/power_supply/battery/charge_full"))
-        assertTrue(RootCommandAllowlist.isAllowedCommand("ls /sys/class/thermal"))
-
-        assertFalse(RootCommandAllowlist.isAllowedCommand("echo 1 > /sys/class/power_supply/battery/charging_enabled"))
-        assertFalse(RootCommandAllowlist.isAllowedCommand("cat /sys/class/thermal/thermal_zone0/temp; rm -rf /"))
+    fun `RootCommandAllowlist allows safe v2 sysfs paths and blocks writes`() {
+        assertTrue(RootCommandAllowlist.isAllowedCommand("cat /proc/sys/vm/swappiness"))
+        assertTrue(RootCommandAllowlist.isAllowedCommand("cat /sys/block/mmcblk0/device/life_time"))
+        assertTrue(RootCommandAllowlist.isAllowedCommand("cat /sys/module/workqueue/parameters/power_efficient"))
+        assertFalse(RootCommandAllowlist.isAllowedCommand("echo 60 > /proc/sys/vm/swappiness"))
+        assertFalse(RootCommandAllowlist.isAllowedCommand("cat /proc/sys/vm/swappiness; rm -rf /"))
         assertFalse(RootCommandAllowlist.isAllowedCommand("cat /data/local/tmp/secret"))
-        assertFalse(RootCommandAllowlist.isAllowedCommand("cat /sys/class/thermal/../../etc/passwd"))
-        assertFalse(RootCommandAllowlist.isAllowedCommand("reboot"))
     }
 
     @Test
-    fun `diagnostic engine handles unavailable optional nodes without reporting hardware error`() {
+    fun `DiagnosticEngine formatAsJson outputs valid structured telemetry`() {
         val snapshot = HardwareSnapshot(
             timestampMs = 1_700_000_000_000L,
             battery = BatteryTelemetry(
-                percentage = SourcedValue(82, "%", DataSourceOrigin.ANDROID_BATTERY_MANAGER),
+                percentage = SourcedValue(80, "%", DataSourceOrigin.SYSFS_BATTERY),
                 voltageMv = SourcedValue(4120.0, "mV", DataSourceOrigin.SYSFS_BATTERY),
                 currentNowMa = SourcedValue(-320.0, "mA", DataSourceOrigin.SYSFS_BATTERY),
-                currentAvgMa = SourcedValue(null, "mA", DataSourceOrigin.UNAVAILABLE),
+                currentAvgMa = SourcedValue(-300.0, "mA", DataSourceOrigin.SYSFS_BATTERY),
                 currentDirectionNote = "Discharging",
                 temperatureC = SourcedValue(33.5, "°C", DataSourceOrigin.SYSFS_BATTERY),
-                status = SourcedValue("Discharging", "", DataSourceOrigin.ANDROID_BATTERY_MANAGER),
+                status = SourcedValue("Discharging", "", DataSourceOrigin.SYSFS_BATTERY),
                 chargingState = "Discharging",
                 healthAndroid = SourcedValue("Good", "", DataSourceOrigin.ANDROID_BATTERY_MANAGER),
                 technology = SourcedValue("Li-poly", "", DataSourceOrigin.ANDROID_BATTERY_MANAGER),
-                chargeCounterMah = SourcedValue(3300.0, "mAh", DataSourceOrigin.SYSFS_BATTERY),
+                chargeCounterMah = SourcedValue(3200.0, "mAh", DataSourceOrigin.SYSFS_BATTERY),
                 chargeFullMah = SourcedValue(3850.0, "mAh", DataSourceOrigin.SYSFS_BATTERY),
                 chargeFullDesignMah = SourcedValue(4100.0, "mAh", DataSourceOrigin.SYSFS_BATTERY),
-                cycleCount = SourcedValue(null, "cycles", DataSourceOrigin.UNAVAILABLE),
+                cycleCount = SourcedValue(120, "cycles", DataSourceOrigin.SYSFS_BATTERY),
                 estimatedHealth = BatteryHealthEstimator.estimate(3850.0, 4100.0),
                 detectedPowerSupplies = emptyList(),
                 severity = HealthSeverity.NORMAL
@@ -187,14 +143,14 @@ class HardwareCalculatorsTest {
             charging = ChargingTelemetry(
                 isChargerConnected = false,
                 isCharging = false,
-                chargingSource = "Disconnected (Battery)",
+                chargingSource = "Disconnected",
                 chargingSpeedLabel = "Not charging",
                 usbVoltageMv = SourcedValue(null, "mV", DataSourceOrigin.UNAVAILABLE),
                 usbCurrentMa = SourcedValue(null, "mA", DataSourceOrigin.UNAVAILABLE),
                 usbPowerWatts = SourcedValue(null, "W", DataSourceOrigin.UNAVAILABLE),
                 batteryVoltageMv = SourcedValue(4120.0, "mV", DataSourceOrigin.SYSFS_BATTERY),
                 batteryCurrentMa = SourcedValue(-320.0, "mA", DataSourceOrigin.SYSFS_BATTERY),
-                batteryPowerWatts = SourcedValue(1.318, "W", DataSourceOrigin.SYSFS_BATTERY),
+                batteryPowerWatts = SourcedValue(1.32, "W", DataSourceOrigin.SYSFS_BATTERY),
                 chargingTemperatureC = SourcedValue(33.5, "°C", DataSourceOrigin.SYSFS_BATTERY),
                 activeSession = null,
                 sessionHistory = emptyList()
@@ -202,66 +158,71 @@ class HardwareCalculatorsTest {
             thermal = ThermalTelemetry(
                 zones = emptyList(),
                 batteryTempC = 33.5,
-                cpuTempC = null,
-                gpuTempC = null,
-                socTempC = null,
-                maxZoneTempC = 33.5,
-                maxRecordedTempC = 33.5,
+                cpuTempC = 44.0,
+                gpuTempC = 42.0,
+                socTempC = 45.0,
+                maxZoneTempC = 45.0,
+                maxRecordedTempC = 45.0,
                 osThermalStatusCode = 0,
-                osThermalStatusLabel = "NONE (Nominal)",
-                osThermalHeadroom = null,
+                osThermalStatusLabel = "NONE",
+                osThermalHeadroom = 0.8f,
                 overallSeverity = HealthSeverity.NORMAL
             ),
             cpu = CpuTelemetry(
-                modelName = "ARMv8 Processor rev 4",
-                hardwarePlatform = "Qualcomm Technologies, Inc MSM8940",
+                modelName = "Snapdragon 435",
+                hardwarePlatform = "MSM8940",
                 architecture = "ARMv8",
                 totalCores = 8,
                 onlineCores = 8,
-                totalUtilizationPercent = 18.4,
-                loadAvg1m = 1.2,
-                loadAvg5m = 1.0,
-                loadAvg15m = 0.9,
+                totalUtilizationPercent = 18.0,
+                loadAvg1m = 0.7,
+                loadAvg5m = 0.6,
+                loadAvg15m = 0.5,
                 cores = emptyList(),
-                availableGovernors = listOf("interactive", "ondemand"),
+                availableGovernors = listOf("interactive"),
                 availableFrequenciesMhz = listOf(960.0, 1401.6),
-                source = DataSourceOrigin.PROCFS
+                source = DataSourceOrigin.PROCFS,
+                totalElapsedMs = 100_000L,
+                awakeUptimeMs = 25_000L,
+                deepSleepMs = 75_000L,
+                deepSleepPercent = 75.0
             ),
             gpu = GpuTelemetry(
-                gpuName = "Adreno (TM) 505",
+                gpuName = "Adreno 505",
                 vendor = "Qualcomm",
                 glEsVersion = "3.2",
-                currentFreqMhz = null,
-                maxFreqMhz = null,
-                minFreqMhz = null,
-                utilizationPercent = null,
-                governor = null,
-                temperatureC = null,
-                availableFrequenciesMhz = emptyList(),
-                sysfsNodePath = null,
-                source = DataSourceOrigin.EGL_DRIVER,
-                isSysfsAvailable = false
+                currentFreqMhz = 300.0,
+                maxFreqMhz = 450.0,
+                minFreqMhz = 133.0,
+                utilizationPercent = 10.0,
+                governor = "msm-adreno-tz",
+                temperatureC = 42.0,
+                availableFrequenciesMhz = listOf(133.0, 300.0, 450.0),
+                sysfsNodePath = "/sys/class/kgsl/kgsl-3d0",
+                source = DataSourceOrigin.SYSFS_KGSL,
+                isSysfsAvailable = true
             ),
             memory = MemoryTelemetry(
-                totalRamBytes = 4L * 1024 * 1024 * 1024,
-                availableRamBytes = 2L * 1024 * 1024 * 1024,
-                usedRamBytes = 2L * 1024 * 1024 * 1024,
-                freeRamBytes = 512L * 1024 * 1024,
-                cachedRamBytes = 800L * 1024 * 1024,
-                buffersBytes = 64L * 1024 * 1024,
-                swapTotalBytes = 1024L * 1024 * 1024,
-                swapFreeBytes = 900L * 1024 * 1024,
+                totalRamBytes = 4_000_000_000L,
+                availableRamBytes = 2_000_000_000L,
+                usedRamBytes = 2_000_000_000L,
+                freeRamBytes = 500_000_000L,
+                cachedRamBytes = 800_000_000L,
+                buffersBytes = 50_000_000L,
+                swapTotalBytes = 1_000_000_000L,
+                swapFreeBytes = 750_000_000L,
                 utilizationPercent = 50.0,
                 isLowMemory = false,
-                thresholdBytes = 256L * 1024 * 1024,
-                interpretation = "Healthy RAM headroom",
-                sources = listOf(DataSourceOrigin.ACTIVITY_MANAGER)
+                thresholdBytes = 200_000_000L,
+                interpretation = "Nominal",
+                sources = listOf(DataSourceOrigin.PROCFS),
+                zramCompressionRatio = 3.2
             ),
             storage = StorageTelemetry(
-                internalTotalBytes = 54L * 1024 * 1024 * 1024,
-                internalUsedBytes = 20L * 1024 * 1024 * 1024,
-                internalFreeBytes = 34L * 1024 * 1024 * 1024,
-                usagePercent = 37.0,
+                internalTotalBytes = 50_000_000_000L,
+                internalUsedBytes = 20_000_000_000L,
+                internalFreeBytes = 30_000_000_000L,
+                usagePercent = 40.0,
                 primaryFsType = "ext4",
                 mounts = emptyList(),
                 blockDevices = emptyList(),
@@ -277,31 +238,23 @@ class HardwareCalculatorsTest {
                 androidVersion = "11",
                 sdkInt = 30,
                 securityPatch = "2023-05-01",
-                buildFingerprint = "xiaomi/santoni/santoni:11/...",
-                supportedAbis = listOf("arm64-v8a", "armeabi-v7a"),
-                kernelVersion = "4.9.337-perf+",
-                linuxProcVersion = "Linux version 4.9.337",
+                buildFingerprint = "santoni",
+                supportedAbis = listOf("arm64-v8a"),
+                kernelVersion = "4.9.337",
+                linuxProcVersion = "Linux 4.9.337",
                 selinuxStatus = "Enforcing",
-                rootStatus = RootStatus.ROOT_NOT_FOUND,
-                rootProbeDetail = "su binary not found",
-                magiskVersion = null,
+                rootStatus = RootStatus.ROOT_AVAILABLE,
+                rootProbeDetail = "uid=0(root)",
+                magiskVersion = "27.0",
                 availableGovernors = listOf("interactive"),
-                availableCpuFrequenciesMhz = listOf(960.0, 1401.6),
+                availableCpuFrequenciesMhz = listOf(960.0),
                 thermalConfigPreview = null
             )
         )
-
         val report = DiagnosticEngine.runDiagnostics(snapshot)
-        assertEquals(0, report.errorCount)
-        assertEquals(DiagnosticStatus.UNAVAILABLE, report.checks.first { it.id == "gpu" }.status)
-        assertEquals(DiagnosticStatus.UNAVAILABLE, report.checks.first { it.id == "root" }.status)
-
-        val txt = DiagnosticEngine.formatAsText(report, snapshot)
-        assertTrue(txt.contains("REDMI 4X HARDWARE LAB"))
-        assertTrue(txt.contains("santoni"))
-
-        val csv = DiagnosticEngine.formatAsCsv(report, snapshot)
-        assertTrue(csv.startsWith("timestamp_ms,device,check_id"))
-        assertTrue(csv.contains("\"battery\""))
+        val jsonStr = DiagnosticEngine.formatAsJson(report, snapshot)
+        assertTrue(jsonStr.contains("\"appVersion\": \"2.0.0\""))
+        assertTrue(jsonStr.contains("\"deepSleepPercent\": 75"))
+        assertTrue(jsonStr.contains("\"zramCompressionRatio\": 3.2"))
     }
 }

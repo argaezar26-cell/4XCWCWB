@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'GitHub Release tag (e.g. v1.0.0)'
+        description: 'GitHub Release tag (e.g. v2.0.0)'
         required: false
-        default: 'v1.0.0'
+        default: 'v2.0.0'
 
 permissions:
   contents: write
@@ -48,11 +48,14 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
+      - name: Run Unit Tests
+        run: gradle :app:testDebugUnitTest --tests com.example.HardwareCalculatorsTest --no-daemon -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
+
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
 
       - name: Prepare named APK file
-        run: cp app/build/outputs/apk/debug/app-debug.apk Redmi4X-Hardware-Lab-v1.0.0.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk Redmi4X-Hardware-Lab-v2.0.0.apk
 
       - name: Publish to GitHub Releases (direct APK download)
         env:
@@ -63,20 +66,24 @@ jobs:
           elif [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
             TAG="${{ github.event.inputs.release_tag }}"
           else
-            TAG="v1.0.0"
+            TAG="v2.0.0"
           fi
 
+          NOTES="Major v2.0.0 Release — Persistent read-only Magisk root shell, Deep Sleep & CPU cluster time_in_state residency, JEDEC eMMC flash wear & Pre-EOL health, zRAM mm_stat compression ratio, thermal trip points & category filters, battery drain/charge %/h & internal resistance, Display/Kernel tunables audit, plus JSON export & Android Share sheet."
+
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" Redmi4X-Hardware-Lab-v1.0.0.apk --clobber
+            gh release upload "$TAG" Redmi4X-Hardware-Lab-v2.0.0.apk --clobber
+            gh release edit "$TAG" --title "Redmi 4X Hardware Lab $TAG" --notes "$NOTES" --latest
           else
-            gh release create "$TAG" Redmi4X-Hardware-Lab-v1.0.0.apk \
+            gh release create "$TAG" Redmi4X-Hardware-Lab-v2.0.0.apk \
               --target "${{ github.sha }}" \
               --title "Redmi 4X Hardware Lab $TAG" \
-              --notes "Direct installable Android APK for Redmi 4X (Santoni) and Android 6.0+ (API 23+). Read-only hardware & kernel diagnostic tool."
+              --notes "$NOTES" \
+              --latest
           fi
 
       - name: Upload Actions Artifact (backup)
         uses: actions/upload-artifact@v4
         with:
-          name: redmi-4x-hardware-lab-debug-apk
-          path: Redmi4X-Hardware-Lab-v1.0.0.apk
+          name: redmi-4x-hardware-lab-v2.0.0-apk
+          path: Redmi4X-Hardware-Lab-v2.0.0.apk

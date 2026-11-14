@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
@@ -134,7 +135,8 @@ fun HardwareLabApp(
     onToggleSensorLiveStream: (Boolean) -> Unit,
     onRunDiagnostics: () -> Unit,
     onBuildTextReport: () -> String?,
-    onBuildCsvReport: () -> String?
+    onBuildCsvReport: () -> String?,
+    onBuildJsonReport: () -> String? = { null }
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -207,6 +209,22 @@ fun HardwareLabApp(
         }
     }
 
+    val createJsonLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            val json = onBuildJsonReport() ?: return@rememberLauncherForActivityResult
+            try {
+                context.contentResolver.openOutputStream(uri)?.use { os ->
+                    os.write(json.toByteArray(Charsets.UTF_8))
+                }
+                exportStatusMessage = "JSON report saved successfully."
+            } catch (e: Exception) {
+                exportStatusMessage = "Failed to write JSON: ${e.message}"
+            }
+        }
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -226,7 +244,7 @@ fun HardwareLabApp(
                         color = LabCyan
                     )
                     Text(
-                        text = "DEEP HARDWARE MONITORING & DIAGNOSTICS",
+                        text = "v2.0.0 • DEEP HARDWARE & KERNEL LAB",
                         style = MaterialTheme.typography.labelSmall,
                         color = LabTextMuted
                     )
@@ -557,12 +575,28 @@ fun HardwareLabApp(
                                                 .replace(" ", "_").replace(":", "-")
                                             createCsvLauncher.launch("redmi4x_hwlab_$ts.csv")
                                         },
+                                        onExportJson = {
+                                            val ts = FormatUtils.formatDateTime(System.currentTimeMillis())
+                                                .replace(" ", "_").replace(":", "-")
+                                            createJsonLauncher.launch("redmi4x_hwlab_$ts.json")
+                                        },
                                         onCopyTxt = {
                                             val text = onBuildTextReport()
                                             if (text != null) {
                                                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                                                 cm?.setPrimaryClip(ClipData.newPlainText("Hardware Diagnostic Report", text))
                                                 exportStatusMessage = "Report copied to clipboard."
+                                            }
+                                        },
+                                        onShareTxt = {
+                                            val text = onBuildTextReport()
+                                            if (text != null) {
+                                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "text/plain"
+                                                    putExtra(Intent.EXTRA_SUBJECT, "Redmi 4X Hardware Lab Diagnostic Report")
+                                                    putExtra(Intent.EXTRA_TEXT, text)
+                                                }
+                                                context.startActivity(Intent.createChooser(shareIntent, "Share Diagnostic Report"))
                                             }
                                         },
                                         buildPreviewText = onBuildTextReport,

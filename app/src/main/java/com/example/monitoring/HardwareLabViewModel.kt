@@ -224,6 +224,14 @@ class HardwareLabViewModel(
         return DiagnosticEngine.formatAsCsv(report, snapshot)
     }
 
+    fun buildJsonReport(): String? {
+        val snapshot = _uiState.value.snapshot ?: return null
+        val report = _uiState.value.diagnosticReport ?: DiagnosticEngine.runDiagnostics(snapshot).also { rep ->
+            _uiState.update { it.copy(diagnosticReport = rep) }
+        }
+        return DiagnosticEngine.formatAsJson(report, snapshot)
+    }
+
     private fun startOrRestartPolling() {
         pollingJob?.cancel()
         pollingJob = viewModelScope.launch {

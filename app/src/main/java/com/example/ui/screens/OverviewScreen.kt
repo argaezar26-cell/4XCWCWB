@@ -68,7 +68,7 @@ fun OverviewScreen(
             LabCard {
                 SectionHeader(
                     title = k.deviceModel,
-                    subtitle = "TARGET HARDWARE IDENTITY",
+                    subtitle = "TARGET HARDWARE IDENTITY • LAB v2.0.0",
                     trailing = {
                         val rootColor = when (k.rootStatus) {
                             RootStatus.ROOT_AVAILABLE -> LabGreen
@@ -83,6 +83,13 @@ fun OverviewScreen(
                 TelemetryRow(label = "Android OS", value = "${k.androidVersion} (API ${k.sdkInt})")
                 TelemetryRow(label = "Kernel Version", value = k.kernelVersion)
                 TelemetryRow(label = "SELinux", value = k.selinuxStatus)
+                if (cpu.totalElapsedMs > 0L) {
+                    TelemetryRow(
+                        label = "Deep Sleep / Awake",
+                        value = "${FormatUtils.formatDecimal(cpu.deepSleepPercent, 1, "%")} (${FormatUtils.formatDurationMs(cpu.deepSleepMs)} / ${FormatUtils.formatDurationMs(cpu.awakeUptimeMs)})",
+                        valueColor = LabCyan
+                    )
+                }
                 if (k.magiskVersion != null) {
                     TelemetryRow(label = "Magisk", value = k.magiskVersion, valueColor = LabCyan)
                 }

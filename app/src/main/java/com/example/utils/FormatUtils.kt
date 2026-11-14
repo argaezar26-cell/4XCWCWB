@@ -65,4 +65,19 @@ object FormatUtils {
         val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
         return sdf.format(Date(ms))
     }
+
+    fun formatDurationMs(ms: Long): String {
+        if (ms <= 0L) return "0m"
+        val totalSec = ms / 1000L
+        val days = totalSec / 86400L
+        val hours = (totalSec % 86400L) / 3600L
+        val mins = (totalSec % 3600L) / 60L
+        val secs = totalSec % 60L
+        return when {
+            days > 0 -> "${days}d ${hours}h ${mins}m"
+            hours > 0 -> "${hours}h ${mins}m"
+            mins > 0 -> "${mins}m ${secs}s"
+            else -> "${secs}s"
+        }
+    }
 }

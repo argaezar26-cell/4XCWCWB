@@ -110,6 +110,17 @@ fun BatteryScreen(
                     source = battery.currentAvgMa.source,
                     nodePath = battery.currentAvgMa.nodePath
                 )
+                val rateLabel = battery.drainOrChargeRatePctPerHour?.let { r ->
+                    val sign = if (r > 0) "+" else ""
+                    val rateStr = "$sign${FormatUtils.formatDecimal(r, 1)}%/hr"
+                    val timePart = battery.estimatedTimeLabel?.let { " • $it" } ?: ""
+                    "$rateStr$timePart"
+                } ?: "N/A"
+                TelemetryRow(
+                    label = "Live Drain / Charge Rate",
+                    value = rateLabel,
+                    valueColor = if ((battery.drainOrChargeRatePctPerHour ?: 0.0) > 0) LabGreen else LabAmber
+                )
                 TelemetryRow(
                     label = "Battery Temperature",
                     value = FormatUtils.formatTemp(battery.temperatureC.value),
@@ -126,6 +137,24 @@ fun BatteryScreen(
                     label = "Chemistry / Technology",
                     value = battery.technology.value ?: "UNAVAILABLE",
                     source = battery.technology.source
+                )
+                TelemetryRow(
+                    label = "Charge Type (PMIC)",
+                    value = battery.chargeType.value ?: "UNAVAILABLE",
+                    source = battery.chargeType.source,
+                    nodePath = battery.chargeType.nodePath
+                )
+                TelemetryRow(
+                    label = "Cell Internal Resistance",
+                    value = FormatUtils.formatDecimal(battery.internalResistanceMohm.value, 1, "mΩ"),
+                    source = battery.internalResistanceMohm.source,
+                    nodePath = battery.internalResistanceMohm.nodePath
+                )
+                TelemetryRow(
+                    label = "Design Max Voltage",
+                    value = FormatUtils.formatMv(battery.voltageMaxDesignMv.value),
+                    source = battery.voltageMaxDesignMv.source,
+                    nodePath = battery.voltageMaxDesignMv.nodePath
                 )
                 TelemetryRow(
                     label = "Charge Counter",

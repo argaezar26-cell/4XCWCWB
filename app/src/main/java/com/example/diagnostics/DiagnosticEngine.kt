@@ -130,13 +130,16 @@ object DiagnosticEngine {
     private fun checkCpu(s: HardwareSnapshot): DiagnosticCheckResult {
         val cpu = s.cpu
         val readableFreqCores = cpu.cores.count { it.currentFreqMhz != null }
+        val deepSleepNote = if (cpu.totalElapsedMs > 0L) {
+            " Deep Sleep: ${FormatUtils.formatDecimal(cpu.deepSleepPercent, 1, "%")}."
+        } else ""
         return if (readableFreqCores > 0) {
             DiagnosticCheckResult(
                 id = "cpu",
                 category = "CPU Scaling & Telemetry",
                 status = DiagnosticStatus.PASS,
                 summary = "${cpu.onlineCores}/${cpu.totalCores} cores online • ${readableFreqCores} cpufreq nodes",
-                technicalReason = "Model: ${cpu.modelName}. Load: ${FormatUtils.formatDecimal(cpu.totalUtilizationPercent, 1, "%")}."
+                technicalReason = "Model: ${cpu.modelName}. Load: ${FormatUtils.formatDecimal(cpu.totalUtilizationPercent, 1, "%")}.$deepSleepNote"
             )
         } else {
             DiagnosticCheckResult(
@@ -144,7 +147,7 @@ object DiagnosticEngine {
                 category = "CPU Scaling & Telemetry",
                 status = DiagnosticStatus.UNAVAILABLE,
                 summary = "${cpu.totalCores} cores detected, cpufreq restricted",
-                technicalReason = "Kernel cpufreq sysfs nodes unreadable without elevated SELinux/root permission (not a hardware fault)."
+                technicalReason = "Kernel cpufreq sysfs nodes unreadable without elevated SELinux/root permission (not a hardware fault).$deepSleepNote"
             )
         }
     }
@@ -196,17 +199,27 @@ object DiagnosticEngine {
 
     private fun checkStorage(s: HardwareSnapshot): DiagnosticCheckResult {
         val st = s.storage
+        val emmc = st.emmcHealth
         val status = when {
-            st.internalTotalBytes <= 0L -> DiagnosticStatus.ERROR
-            st.usagePercent >= 92.0 -> DiagnosticStatus.WARNING
+            st.internalTotalBytes <= 0L || emmc?.preEolSeverity == HealthSeverity.CRITICAL -> DiagnosticStatus.ERROR
+            st.usagePercent >= 92.0 || emmc?.preEolSeverity == HealthSeverity.WARNING -> DiagnosticStatus.WARNING
             else -> DiagnosticStatus.PASS
         }
+        val emmcNote = emmc?.let {
+            val parts = listOfNotNull(
+                it.deviceName?.let { n -> "eMMC $n" },
+                it.preEolStatus?.let { eol -> "Pre-EOL: $eol" },
+                it.lifeTimeTypeA?.let { a -> "SLC/TypeA: $a" },
+                it.lifeTimeTypeB?.let { b -> "MLC/TypeB: $b" }
+            )
+            if (parts.isNotEmpty()) " ${parts.joinToString(" | ")}." else ""
+        } ?: ""
         return DiagnosticCheckResult(
             id = "storage",
-            category = "Internal Storage",
+            category = "Internal Storage & Flash",
             status = status,
             summary = "${FormatUtils.formatBytes(st.internalUsedBytes)} / ${FormatUtils.formatBytes(st.internalTotalBytes)} (${FormatUtils.formatDecimal(st.usagePercent, 1, "%")})",
-            technicalReason = st.diagnosticNote
+            technicalReason = "${st.diagnosticNote}$emmcNote"
         )
     }
 
@@ -288,13 +301,19 @@ object DiagnosticEngine {
             appendLine()
         }
         appendLine("------------------------------------------------------------")
-        appendLine("RAW TELEMETRY SNAPSHOT")
+        appendLine("RAW TELEMETRY SNAPSHOT (v2.0.0)")
         appendLine("  Battery : ${snapshot.battery.percentage.value ?: "N/A"}% | ${FormatUtils.formatMv(snapshot.battery.voltageMv.value)} | ${FormatUtils.formatSignedMa(snapshot.battery.currentNowMa.value)} | ${FormatUtils.formatTemp(snapshot.battery.temperatureC.value)}")
         appendLine("  USB Rail: ${FormatUtils.formatMv(snapshot.charging.usbVoltageMv.value)} | ${FormatUtils.formatSignedMa(snapshot.charging.usbCurrentMa.value)} | ${FormatUtils.formatWatts(snapshot.charging.usbPowerWatts.value)}")
-        appendLine("  CPU     : ${snapshot.cpu.modelName} (${snapshot.cpu.onlineCores}/${snapshot.cpu.totalCores} cores) Load=${FormatUtils.formatDecimal(snapshot.cpu.totalUtilizationPercent, 1, "%")}")
+        appendLine("  CPU     : ${snapshot.cpu.modelName} (${snapshot.cpu.onlineCores}/${snapshot.cpu.totalCores} cores) Load=${FormatUtils.formatDecimal(snapshot.cpu.totalUtilizationPercent, 1, "%")} DeepSleep=${FormatUtils.formatDecimal(snapshot.cpu.deepSleepPercent, 1, "%")}")
         appendLine("  GPU     : ${snapshot.gpu.gpuName} | Clock=${FormatUtils.formatFreqMhz(snapshot.gpu.currentFreqMhz)}")
-        appendLine("  RAM     : ${FormatUtils.formatBytes(snapshot.memory.usedRamBytes)} / ${FormatUtils.formatBytes(snapshot.memory.totalRamBytes)}")
+        appendLine("  RAM     : ${FormatUtils.formatBytes(snapshot.memory.usedRamBytes)} / ${FormatUtils.formatBytes(snapshot.memory.totalRamBytes)} | zRAM Ratio=${FormatUtils.formatDecimal(snapshot.memory.zramCompressionRatio, 2, "x")}")
         appendLine("  Storage : ${FormatUtils.formatBytes(snapshot.storage.internalUsedBytes)} / ${FormatUtils.formatBytes(snapshot.storage.internalTotalBytes)} (${snapshot.storage.primaryFsType ?: "N/A"})")
+        snapshot.storage.emmcHealth?.let { emmc ->
+            appendLine("  eMMC    : ${emmc.deviceName ?: "N/A"} | Pre-EOL=${emmc.preEolStatus ?: "N/A"} | WearA=${emmc.lifeTimeTypeA ?: "N/A"}")
+        }
+        snapshot.kernelSystem.displayInfo?.let { d ->
+            appendLine("  Display : ${d.widthPx}x${d.heightPx} @ ${d.densityDpi}dpi | ${FormatUtils.formatDecimal(d.refreshRateHz.toDouble(), 0, "Hz")}")
+        }
         appendLine("============================================================")
     }
 
@@ -312,6 +331,99 @@ object DiagnosticEngine {
                     escapeCsv(check.technicalReason)
                 ).joinToString(",")
             )
+        }
+    }
+
+    fun formatAsJson(report: DiagnosticReport, snapshot: HardwareSnapshot): String = buildString {
+        fun q(s: String): String = "\"${escapeJson(s)}\""
+        fun optStr(s: String?): String = if (s == null) "null" else q(s)
+        fun optNum(n: Double?): String = if (n == null || !n.isFinite()) "null" else n.toString()
+
+        appendLine("{")
+        appendLine("  \"appVersion\": \"2.0.0\",")
+        appendLine("  \"generatedAtMs\": ${report.generatedAtMs},")
+        appendLine("  \"generatedAtIso\": ${q(FormatUtils.formatDateTime(report.generatedAtMs))},")
+        appendLine("  \"deviceLabel\": ${q(report.deviceLabel)},")
+        appendLine("  \"summary\": {")
+        appendLine("    \"pass\": ${report.passCount},")
+        appendLine("    \"warning\": ${report.warningCount},")
+        appendLine("    \"unavailable\": ${report.unavailableCount},")
+        appendLine("    \"error\": ${report.errorCount}")
+        appendLine("  },")
+        appendLine("  \"checks\": [")
+        report.checks.forEachIndexed { idx, c ->
+            val comma = if (idx < report.checks.lastIndex) "," else ""
+            appendLine("    {")
+            appendLine("      \"id\": ${q(c.id)},")
+            appendLine("      \"category\": ${q(c.category)},")
+            appendLine("      \"status\": ${q(c.status.name)},")
+            appendLine("      \"summary\": ${q(c.summary)},")
+            appendLine("      \"technicalReason\": ${q(c.technicalReason)}")
+            appendLine("    }$comma")
+        }
+        appendLine("  ],")
+        appendLine("  \"telemetry\": {")
+        appendLine("    \"battery\": {")
+        appendLine("      \"percentage\": ${snapshot.battery.percentage.value?.toString() ?: "null"},")
+        appendLine("      \"voltageMv\": ${optNum(snapshot.battery.voltageMv.value)},")
+        appendLine("      \"currentNowMa\": ${optNum(snapshot.battery.currentNowMa.value)},")
+        appendLine("      \"temperatureC\": ${optNum(snapshot.battery.temperatureC.value)},")
+        appendLine("      \"chargeType\": ${optStr(snapshot.battery.chargeType.value)},")
+        appendLine("      \"internalResistanceMohm\": ${optNum(snapshot.battery.internalResistanceMohm.value)},")
+        appendLine("      \"drainOrChargePctPerHour\": ${optNum(snapshot.battery.drainOrChargeRatePctPerHour)}")
+        appendLine("    },")
+        appendLine("    \"cpu\": {")
+        appendLine("      \"modelName\": ${q(snapshot.cpu.modelName)},")
+        appendLine("      \"totalCores\": ${snapshot.cpu.totalCores},")
+        appendLine("      \"onlineCores\": ${snapshot.cpu.onlineCores},")
+        appendLine("      \"utilizationPercent\": ${optNum(snapshot.cpu.totalUtilizationPercent)},")
+        appendLine("      \"deepSleepMs\": ${snapshot.cpu.deepSleepMs},")
+        appendLine("      \"deepSleepPercent\": ${optNum(snapshot.cpu.deepSleepPercent)}")
+        appendLine("    },")
+        appendLine("    \"gpu\": {")
+        appendLine("      \"name\": ${q(snapshot.gpu.gpuName)},")
+        appendLine("      \"currentFreqMhz\": ${optNum(snapshot.gpu.currentFreqMhz)},")
+        appendLine("      \"utilizationPercent\": ${optNum(snapshot.gpu.utilizationPercent)}")
+        appendLine("    },")
+        appendLine("    \"memory\": {")
+        appendLine("      \"totalRamBytes\": ${snapshot.memory.totalRamBytes},")
+        appendLine("      \"usedRamBytes\": ${snapshot.memory.usedRamBytes},")
+        appendLine("      \"zramCompressionRatio\": ${optNum(snapshot.memory.zramCompressionRatio)}")
+        appendLine("    },")
+        appendLine("    \"storage\": {")
+        appendLine("      \"internalTotalBytes\": ${snapshot.storage.internalTotalBytes},")
+        appendLine("      \"internalUsedBytes\": ${snapshot.storage.internalUsedBytes},")
+        appendLine("      \"primaryFsType\": ${optStr(snapshot.storage.primaryFsType)},")
+        appendLine("      \"emmcPreEol\": ${optStr(snapshot.storage.emmcHealth?.preEolStatus)},")
+        appendLine("      \"emmcWearTypeA\": ${optStr(snapshot.storage.emmcHealth?.lifeTimeTypeA)}")
+        appendLine("    },")
+        appendLine("    \"kernelSystem\": {")
+        appendLine("      \"androidVersion\": ${q(snapshot.kernelSystem.androidVersion)},")
+        appendLine("      \"sdkInt\": ${snapshot.kernelSystem.sdkInt},")
+        appendLine("      \"kernelVersion\": ${q(snapshot.kernelSystem.kernelVersion)},")
+        appendLine("      \"rootStatus\": ${q(snapshot.kernelSystem.rootStatus.label)},")
+        appendLine("      \"selinuxStatus\": ${q(snapshot.kernelSystem.selinuxStatus)}")
+        appendLine("    }")
+        appendLine("  }")
+        append("}")
+    }
+
+    private fun escapeJson(value: String): String = buildString(value.length) {
+        for (ch in value) {
+            when (ch) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                '\b' -> append("\\b")
+                '\u000C' -> append("\\f")
+                else -> if (ch.code < 0x20) {
+                    append(String.format("\\u%04x", ch.code))
+                } else {
+                    append(ch)
+                }
+            }
         }
     }
 

@@ -27,6 +27,7 @@ import com.example.ui.components.LabCard
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.StatusPill
 import com.example.ui.components.TelemetryRow
+import com.example.utils.FormatUtils
 import com.example.ui.theme.LabAmber
 import com.example.ui.theme.LabBackground
 import com.example.ui.theme.LabCyan
@@ -139,6 +140,39 @@ fun KernelRootScreen(
             }
         }
 
+        kernel.displayInfo?.let { d ->
+            item {
+                LabCard {
+                    SectionHeader(
+                        title = "Display Hardware Panel",
+                        subtitle = "DISPLAYMANAGER & DISPLAY.MODE"
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TelemetryRow(
+                        label = "Physical Resolution",
+                        value = "${d.widthPx} × ${d.heightPx} px",
+                        valueColor = LabCyan
+                    )
+                    TelemetryRow(label = "Density", value = "${d.densityDpi} dpi")
+                    TelemetryRow(
+                        label = "Active Refresh Rate",
+                        value = FormatUtils.formatDecimal(d.refreshRateHz.toDouble(), 1, "Hz"),
+                        valueColor = LabGreen
+                    )
+                    TelemetryRow(
+                        label = "Supported Refresh Modes",
+                        value = d.supportedRefreshRatesHz.joinToString(", ") {
+                            FormatUtils.formatDecimal(it.toDouble(), 0, "Hz")
+                        }
+                    )
+                    TelemetryRow(
+                        label = "HDR Capability",
+                        value = if (d.isHdrCapable) "Supported" else "SDR Only"
+                    )
+                }
+            }
+        }
+
         item {
             LabCard {
                 SectionHeader(
@@ -158,6 +192,27 @@ fun KernelRootScreen(
                         kernel.availableCpuFrequenciesMhz.joinToString(", ") { "${it.toInt()} MHz" }
                     } else "UNAVAILABLE"
                 )
+            }
+        }
+
+        if (kernel.tunables.isNotEmpty()) {
+            item {
+                LabCard {
+                    SectionHeader(
+                        title = "Kernel Tunables Audit (Read-Only)",
+                        subtitle = "/proc/sys/ & /sys/module/"
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    kernel.tunables.forEach { item ->
+                        TelemetryRow(
+                            label = item.label,
+                            value = item.value ?: "UNAVAILABLE",
+                            valueColor = if (item.value != null) LabCyan else LabTextMuted,
+                            source = item.source,
+                            nodePath = item.path
+                        )
+                    }
+                }
             }
         }
 

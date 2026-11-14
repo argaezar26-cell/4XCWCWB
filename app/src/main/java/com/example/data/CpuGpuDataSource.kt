@@ -2,9 +2,11 @@ package com.example.data
 
 import android.app.ActivityManager
 import android.content.Context
+import android.os.SystemClock
 import com.example.domain.CpuCoreTelemetry
 import com.example.domain.CpuFreqParser
 import com.example.domain.CpuTelemetry
+import com.example.domain.CpuTimeInStateCluster
 import com.example.domain.DataSourceOrigin
 import com.example.domain.GpuTelemetry
 import com.example.domain.ThermalParser
@@ -71,11 +73,19 @@ class CpuGpuDataSource(
             "cpufreq/scaling_available_governors",
             "cpufreq/scaling_available_frequencies"
         )
+        val timeInStateCandidates = listOf(
+            "$cpuBaseDir/cpu0/cpufreq/stats/time_in_state",
+            "$cpuBaseDir/cpufreq/policy0/stats/time_in_state",
+            "$cpuBaseDir/cpu4/cpufreq/stats/time_in_state",
+            "$cpuBaseDir/cpufreq/policy4/stats/time_in_state"
+        )
+
         val cpuPaths = buildList {
             coreIndices.forEach { idx ->
                 if (idx > 0) add("$cpuBaseDir/cpu$idx/online")
                 cpuFiles.forEach { f -> add("$cpuBaseDir/cpu$idx/$f") }
             }
+            addAll(timeInStateCandidates)
         }
         val cpuBatch = sysfsReader.preloadBatchForRoot(cpuPaths)
 
@@ -146,6 +156,41 @@ class CpuGpuDataSource(
         previousProcStat = currProcStat
         val onlineCores = coreList.count { it.isOnline == true || it.currentFreqMhz != null }
 
+        val totalElapsedMs = SystemClock.elapsedRealtime().coerceAtLeast(0L)
+        val awakeUptimeMs = SystemClock.uptimeMillis().coerceAtLeast(0L)
+        val deepSleepMs = (totalElapsedMs - awakeUptimeMs).coerceAtLeast(0L)
+        val deepSleepPct = if (totalElapsedMs > 0L) {
+            (deepSleepMs.toDouble() / totalElapsedMs.toDouble()) * 100.0
+        } else 0.0
+
+        val clusters = buildList {
+            val littlePath = listOf(
+                "$cpuBaseDir/cpu0/cpufreq/stats/time_in_state",
+                "$cpuBaseDir/cpufreq/policy0/stats/time_in_state"
+            ).firstOrNull { !cpuBatch[it]?.content.isNullOrBlank() }
+            if (littlePath != null) {
+                val res = cpuBatch[littlePath]
+                if (res?.usedRoot == true) anyRootUsed = true
+                val entries = CpuFreqParser.parseTimeInState(res?.content)
+                if (entries.isNotEmpty()) {
+                    add(CpuTimeInStateCluster("Cluster 0 (Little / Core 0-3)", littlePath, entries))
+                }
+            }
+
+            val bigPath = listOf(
+                "$cpuBaseDir/cpu4/cpufreq/stats/time_in_state",
+                "$cpuBaseDir/cpufreq/policy4/stats/time_in_state"
+            ).firstOrNull { !cpuBatch[it]?.content.isNullOrBlank() }
+            if (bigPath != null) {
+                val res = cpuBatch[bigPath]
+                if (res?.usedRoot == true) anyRootUsed = true
+                val entries = CpuFreqParser.parseTimeInState(res?.content)
+                if (entries.isNotEmpty()) {
+                    add(CpuTimeInStateCluster("Cluster 1 (Big / Core 4-7)", bigPath, entries))
+                }
+            }
+        }
+
         CpuTelemetry(
             modelName = modelName,
             hardwarePlatform = hardwarePlatform,
@@ -159,7 +204,12 @@ class CpuGpuDataSource(
             cores = coreList,
             availableGovernors = allGovernors.toList(),
             availableFrequenciesMhz = allFrequencies.sorted(),
-            source = sysfsReader.resolveSource(DataSourceOrigin.PROCFS, anyRootUsed)
+            source = sysfsReader.resolveSource(DataSourceOrigin.PROCFS, anyRootUsed),
+            totalElapsedMs = totalElapsedMs,
+            awakeUptimeMs = awakeUptimeMs,
+            deepSleepMs = deepSleepMs,
+            deepSleepPercent = deepSleepPct,
+            timeInStateClusters = clusters
         )
     }
 

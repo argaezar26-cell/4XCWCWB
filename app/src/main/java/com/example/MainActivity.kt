@@ -58,7 +58,8 @@ class MainActivity : ComponentActivity() {
                     onToggleSensorLiveStream = viewModel::setSensorLiveStream,
                     onRunDiagnostics = { viewModel.runDiagnostics() },
                     onBuildTextReport = viewModel::buildTextReport,
-                    onBuildCsvReport = viewModel::buildCsvReport
+                    onBuildCsvReport = viewModel::buildCsvReport,
+                    onBuildJsonReport = viewModel::buildJsonReport
                 )
             }
         }

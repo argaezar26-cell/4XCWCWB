@@ -22,11 +22,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ShowChart
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.NotificationsActive
-import androidx.compose.material.icons.outlined.ShowChart
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -197,7 +197,7 @@ fun SourceOriginTag(
         DataSourceOrigin.UNAVAILABLE -> LabTextMuted
         DataSourceOrigin.SYSFS_USB, DataSourceOrigin.SYSFS_BATTERY, DataSourceOrigin.SYSFS_THERMAL,
         DataSourceOrigin.SYSFS_CPU, DataSourceOrigin.SYSFS_KGSL, DataSourceOrigin.SYSFS_DEVFREQ,
-        DataSourceOrigin.SYSFS_BLOCK, DataSourceOrigin.SYSFS_POWER_SUPPLY -> LabCyan
+        DataSourceOrigin.SYSFS_BLOCK, DataSourceOrigin.SYSFS_MMC, DataSourceOrigin.SYSFS_POWER_SUPPLY -> LabCyan
         else -> LabBlue
     }
     Column(modifier = modifier) {
@@ -328,6 +328,36 @@ fun UsageProgressBar(
 }
 
 @Composable
+fun HorizontalBarMetricRow(
+    label: String,
+    valueLabel: String,
+    fraction: Float,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = label,
+                style = MonoValueSmall,
+                color = LabTextPrimary
+            )
+            Text(
+                text = valueLabel,
+                style = MonoValueSmall,
+                color = color
+            )
+        }
+        Spacer(modifier = Modifier.height(3.dp))
+        UsageProgressBar(progress = fraction, color = color)
+    }
+}
+
+@Composable
 fun RealTimeLineChart(
     title: String,
     unit: String,
@@ -392,7 +422,7 @@ fun RealTimeLineChart(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Outlined.ShowChart,
+                        imageVector = Icons.AutoMirrored.Outlined.ShowChart,
                         contentDescription = null,
                         tint = LabTextMuted,
                         modifier = Modifier.size(18.dp)

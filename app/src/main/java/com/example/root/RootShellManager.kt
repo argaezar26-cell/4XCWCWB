@@ -46,6 +46,9 @@ object RootCommandAllowlist {
         "/sys/class/devfreq/",
         "/sys/block/",
         "/sys/fs/selinux/enforce",
+        "/sys/module/workqueue/",
+        "/sys/kernel/fast_charge/",
+        "/sys/android_touch/",
         "/proc/cpuinfo",
         "/proc/stat",
         "/proc/meminfo",
@@ -53,6 +56,9 @@ object RootCommandAllowlist {
         "/proc/mounts",
         "/proc/partitions",
         "/proc/version",
+        "/proc/sys/vm/",
+        "/proc/sys/kernel/",
+        "/proc/sys/net/ipv4/tcp_congestion_control",
         "/vendor/etc/thermal-engine",
         "/system/etc/thermal-engine"
     )
@@ -114,6 +120,11 @@ class RootShellManager {
 
     private val missingRootPaths: MutableSet<String> = Collections.synchronizedSet(HashSet())
 
+    private val persistentShellLock = Any()
+    private var persistentProcess: Process? = null
+    private var persistentWriter: java.io.BufferedWriter? = null
+    private var persistentReader: java.io.BufferedReader? = null
+
     suspend fun probeRootAccess(forceRefresh: Boolean = false): RootProbeResult = withContext(Dispatchers.IO) {
         if (!forceRefresh && cachedStatus != null) {
             return@withContext RootProbeResult(
@@ -125,6 +136,7 @@ class RootShellManager {
 
         if (forceRefresh) {
             missingRootPaths.clear()
+            closePersistentShell()
         }
 
         val probeExec = executeRawSu("id", timeoutMs = 4000L)
@@ -182,8 +194,8 @@ class RootShellManager {
     }
 
     /**
-     * Reads multiple allowlisted sysfs/procfs files in a SINGLE read-only `su` call
-     * to avoid spawning hundreds of `su` processes per refresh tick.
+     * Reads multiple allowlisted sysfs/procfs files in a persistent read-only `su` session
+     * (falling back to single `su -c` calls if needed) to eliminate per-tick spawn latency.
      */
     suspend fun readAllowlistedBatch(paths: List<String>): Map<String, String> = withContext(Dispatchers.IO) {
         if (cachedStatus != RootStatus.ROOT_AVAILABLE || paths.isEmpty()) {
@@ -201,9 +213,15 @@ class RootShellManager {
             val script = chunk.joinToString("; ") { p ->
                 "if [ -r '$p' ]; then echo '__HWLAB_BEGIN__$p'; head -c 4096 '$p' 2>/dev/null; echo ''; echo '__HWLAB_END__'; fi"
             }
-            val execRes = executeRawSu(script, timeoutMs = 2500L)
-            if (execRes.exitCode == 0 && !execRes.timedOut && execRes.output.isNotBlank()) {
-                val parsed = parseBatchOutput(execRes.output)
+            val persistentOut = executeInPersistentShell(script, timeoutMs = 2000L)
+            val rawOutput = if (persistentOut != null) {
+                persistentOut
+            } else {
+                val execRes = executeRawSu(script, timeoutMs = 2500L)
+                if (execRes.exitCode == 0 && !execRes.timedOut) execRes.output else ""
+            }
+            if (rawOutput.isNotBlank()) {
+                val parsed = parseBatchOutput(rawOutput)
                 results.putAll(parsed)
                 chunk.forEach { p ->
                     if (p !in parsed) {
@@ -213,6 +231,100 @@ class RootShellManager {
             }
         }
         results
+    }
+
+    private fun executeInPersistentShell(script: String, timeoutMs: Long): String? = synchronized(persistentShellLock) {
+        if (cachedStatus != RootStatus.ROOT_AVAILABLE) return null
+        val sentinel = "__HWLAB_BATCH_DONE_${System.nanoTime()}__"
+        val future = java.util.concurrent.FutureTask {
+            val writer = ensurePersistentShellWriter() ?: return@FutureTask null
+            val reader = persistentReader ?: return@FutureTask null
+            writer.write(script)
+            writer.write("; echo '$sentinel'\n")
+            writer.flush()
+
+            val sb = StringBuilder()
+            var totalChars = 0
+            while (totalChars < 131072) {
+                val line = reader.readLine() ?: return@FutureTask null
+                if (line == sentinel) {
+                    return@FutureTask sb.toString()
+                }
+                if (sb.isNotEmpty()) sb.append('\n')
+                sb.append(line)
+                totalChars += line.length + 1
+            }
+            sb.toString()
+        }
+
+        val worker = Thread(future, "hwlab-su-shell").apply {
+            isDaemon = true
+            start()
+        }
+        return try {
+            val output = future.get(timeoutMs, TimeUnit.MILLISECONDS)
+            if (output == null) {
+                closePersistentShellLocked()
+            }
+            output
+        } catch (_: Exception) {
+            future.cancel(true)
+            closePersistentShellLocked()
+            null
+        } finally {
+            try {
+                worker.join(50)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun ensurePersistentShellWriter(): java.io.BufferedWriter? {
+        val existing = persistentProcess
+        val existingAlive = existing != null && try {
+            existing.exitValue()
+            false
+        } catch (_: IllegalThreadStateException) {
+            true
+        }
+        if (existingAlive && persistentWriter != null && persistentReader != null) {
+            return persistentWriter
+        }
+        closePersistentShellLocked()
+        return try {
+            val proc = ProcessBuilder("su")
+                .redirectErrorStream(true)
+                .start()
+            persistentProcess = proc
+            persistentWriter = proc.outputStream.bufferedWriter()
+            persistentReader = proc.inputStream.bufferedReader()
+            persistentWriter
+        } catch (_: Exception) {
+            closePersistentShellLocked()
+            null
+        }
+    }
+
+    fun closePersistentShell() = synchronized(persistentShellLock) {
+        closePersistentShellLocked()
+    }
+
+    private fun closePersistentShellLocked() {
+        try {
+            persistentWriter?.close()
+        } catch (_: Exception) {
+        }
+        try {
+            persistentReader?.close()
+        } catch (_: Exception) {
+        }
+        try {
+            persistentProcess?.destroyForcibly()
+        } catch (_: Exception) {
+        }
+        persistentWriter = null
+        persistentReader = null
+        persistentProcess = null
     }
 
     private fun parseBatchOutput(raw: String): Map<String, String> {

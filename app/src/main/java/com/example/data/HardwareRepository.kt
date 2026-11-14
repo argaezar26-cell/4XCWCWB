@@ -28,7 +28,7 @@ class HardwareRepositoryImpl(
     private val thermalDataSource: ThermalDataSource = ThermalDataSource(context, sysfsReader),
     private val cpuGpuDataSource: CpuGpuDataSource = CpuGpuDataSource(context, sysfsReader),
     private val memoryStorageDataSource: MemoryStorageDataSource = MemoryStorageDataSource(context, sysfsReader),
-    private val kernelSystemDataSource: KernelSystemDataSource = KernelSystemDataSource(sysfsReader, rootShellManager),
+    private val kernelSystemDataSource: KernelSystemDataSource = KernelSystemDataSource(context, sysfsReader, rootShellManager),
     private val deviceSensorManager: DeviceSensorManager = DeviceSensorManager(context)
 ) : HardwareRepository {
 

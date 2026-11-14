@@ -1,6 +1,11 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -8,15 +13,27 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.domain.ThermalTelemetry
+import com.example.domain.ThermalZoneCategory
 import com.example.domain.TelemetryHistoryState
 import com.example.ui.components.LabCard
 import com.example.ui.components.MetricTile
@@ -27,10 +44,14 @@ import com.example.ui.components.StatusPill
 import com.example.ui.components.TelemetryRow
 import com.example.ui.components.severityColor
 import com.example.ui.theme.LabAmber
+import com.example.ui.theme.LabBorderSubtle
 import com.example.ui.theme.LabCyan
+import com.example.ui.theme.LabCyanDim
+import com.example.ui.theme.LabSurfaceHigh
 import com.example.ui.theme.LabTextMuted
 import com.example.ui.theme.LabTextSecondary
 import com.example.ui.theme.MonoValueMedium
+import com.example.ui.theme.MonoValueSmall
 import com.example.utils.FormatUtils
 
 @Composable
@@ -39,6 +60,21 @@ fun ThermalScreen(
     history: TelemetryHistoryState,
     modifier: Modifier = Modifier
 ) {
+    var selectedFilter by remember { mutableStateOf("All") }
+    val filterOptions = listOf("All", "Active", "CPU", "GPU", "SoC", "Battery", "PMIC")
+
+    val filteredZones = remember(thermal.zones, selectedFilter) {
+        when (selectedFilter) {
+            "Active" -> thermal.zones.filter { it.temperatureC != null }
+            "CPU" -> thermal.zones.filter { it.category == ThermalZoneCategory.CPU }
+            "GPU" -> thermal.zones.filter { it.category == ThermalZoneCategory.GPU }
+            "SoC" -> thermal.zones.filter { it.category == ThermalZoneCategory.SOC }
+            "Battery" -> thermal.zones.filter { it.category == ThermalZoneCategory.BATTERY }
+            "PMIC" -> thermal.zones.filter { it.category == ThermalZoneCategory.PMIC_BOARD }
+            else -> thermal.zones
+        }
+    }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -129,22 +165,59 @@ fun ThermalScreen(
         item {
             SectionHeader(
                 title = "Thermal Sensor Inventory",
-                subtitle = "${thermal.zones.size} ZONES UNDER /sys/class/thermal/"
+                subtitle = "${filteredZones.size}/${thermal.zones.size} ZONES UNDER /sys/class/thermal/"
             )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                filterOptions.forEach { option ->
+                    val selected = option == selectedFilter
+                    Box(
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) LabCyanDim else LabSurfaceHigh)
+                            .border(
+                                1.dp,
+                                if (selected) LabCyan else LabBorderSubtle,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .clickable { selectedFilter = option }
+                            .testTag("thermal_filter_${option.lowercase()}")
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = option,
+                            style = MonoValueSmall,
+                            color = if (selected) LabCyan else LabTextSecondary,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
         }
 
-        if (thermal.zones.isEmpty()) {
+        if (filteredZones.isEmpty()) {
             item {
                 LabCard {
                     Text(
-                        text = "No thermal_zone* nodes readable via direct sysfs or current permissions. Relying on Battery temperature and PowerManager thermal status.",
+                        text = if (thermal.zones.isEmpty()) {
+                            "No thermal_zone* nodes readable via direct sysfs or current permissions. Relying on Battery temperature and PowerManager thermal status."
+                        } else {
+                            "No thermal zones match filter '$selectedFilter'."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = LabTextMuted
                     )
                 }
             }
         } else {
-            items(thermal.zones, key = { it.zoneName }) { zone ->
+            items(filteredZones, key = { it.zoneName }) { zone ->
                 LabCard {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -166,6 +239,18 @@ fun ThermalScreen(
                             text = FormatUtils.formatTemp(zone.temperatureC),
                             style = MonoValueMedium,
                             color = severityColor(zone.severity)
+                        )
+                    }
+                    if (zone.tripPoints.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        val tripsSummary = zone.tripPoints.joinToString(" | ") { tp ->
+                            val tLabel = tp.type ?: "trip${tp.index}"
+                            "$tLabel: ${FormatUtils.formatTemp(tp.tempCelsius)}"
+                        }
+                        Text(
+                            text = "Trips: $tripsSummary",
+                            style = MonoValueSmall,
+                            color = LabAmber
                         )
                     }
                     Spacer(modifier = Modifier.height(4.dp))

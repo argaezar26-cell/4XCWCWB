@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import com.example.domain.CpuTelemetry
 import com.example.domain.GpuTelemetry
 import com.example.domain.TelemetryHistoryState
+import com.example.ui.components.HorizontalBarMetricRow
 import com.example.ui.components.LabCard
 import com.example.ui.components.MetricTile
 import com.example.ui.components.RealTimeLineChart
@@ -88,6 +89,67 @@ fun CpuGpuScreen(
                 minMax = history.cpuLoadMinMax,
                 decimals = 1
             )
+        }
+
+        if (cpu.totalElapsedMs > 0L) {
+            item {
+                val awakePct = (100.0 - cpu.deepSleepPercent).coerceIn(0.0, 100.0)
+                LabCard {
+                    SectionHeader(
+                        title = "SoC Sleep & Uptime Efficiency",
+                        subtitle = "SYSTEMCLOCK ELAPSED REALTIME VS UPTIME"
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    HorizontalBarMetricRow(
+                        label = "Deep Sleep (${FormatUtils.formatDurationMs(cpu.deepSleepMs)})",
+                        valueLabel = FormatUtils.formatDecimal(cpu.deepSleepPercent, 1, "%"),
+                        fraction = (cpu.deepSleepPercent / 100.0).toFloat(),
+                        color = LabGreen
+                    )
+                    HorizontalBarMetricRow(
+                        label = "Awake Time (${FormatUtils.formatDurationMs(cpu.awakeUptimeMs)})",
+                        valueLabel = FormatUtils.formatDecimal(awakePct, 1, "%"),
+                        fraction = (awakePct / 100.0).toFloat(),
+                        color = LabAmber
+                    )
+                    TelemetryRow(
+                        label = "Total Time Since Boot",
+                        value = FormatUtils.formatDurationMs(cpu.totalElapsedMs)
+                    )
+                }
+            }
+        }
+
+        if (cpu.timeInStateClusters.isNotEmpty()) {
+            item {
+                SectionHeader(
+                    title = "CPU Frequency Residency (time_in_state)",
+                    subtitle = "KERNEL CPUFREQ STATS"
+                )
+            }
+            items(cpu.timeInStateClusters, key = { it.sourcePath }) { cluster ->
+                LabCard {
+                    Text(
+                        text = cluster.clusterName,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = LabCyan
+                    )
+                    Text(
+                        text = cluster.sourcePath,
+                        style = MonoValueSmall,
+                        color = LabTextMuted
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    cluster.entries.sortedByDescending { it.percent }.take(8).forEach { entry ->
+                        HorizontalBarMetricRow(
+                            label = "${FormatUtils.formatFreqMhz(entry.freqMhz)} (${FormatUtils.formatDurationMs(entry.timeMs)})",
+                            valueLabel = FormatUtils.formatDecimal(entry.percent, 1, "%"),
+                            fraction = (entry.percent / 100.0).toFloat(),
+                            color = if (entry.percent >= 25.0) LabCyan else LabBlue
+                        )
+                    }
+                }
+            }
         }
 
         item {

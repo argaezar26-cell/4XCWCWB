@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -41,6 +42,7 @@ import com.example.ui.components.StatusPill
 import com.example.ui.components.diagnosticStatusColor
 import com.example.ui.theme.LabAmber
 import com.example.ui.theme.LabBackground
+import com.example.ui.theme.LabBlue
 import com.example.ui.theme.LabCyan
 import com.example.ui.theme.LabGreen
 import com.example.ui.theme.LabRed
@@ -56,7 +58,9 @@ fun DiagnosticsScreen(
     onRunDiagnostics: () -> Unit,
     onExportTxt: () -> Unit,
     onExportCsv: () -> Unit,
+    onExportJson: () -> Unit = {},
     onCopyTxt: () -> Unit,
+    onShareTxt: () -> Unit = {},
     buildPreviewText: () -> String?,
     statusBanner: String?,
     modifier: Modifier = Modifier
@@ -100,7 +104,7 @@ fun DiagnosticsScreen(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Evaluates battery, charging rails, thermal zones, CPU, GPU, RAM, storage, sensors, root access, and kernel info. Unavailable optional nodes are never flagged as hardware damage.",
+                    text = "Evaluates battery, charging rails, thermal zones, CPU, GPU, RAM/zRAM, eMMC/storage, sensors, root access, and kernel info. Unavailable optional nodes are never flagged as hardware damage.",
                     style = MaterialTheme.typography.bodySmall,
                     color = LabTextSecondary
                 )
@@ -131,7 +135,7 @@ fun DiagnosticsScreen(
                     ) {
                         Icon(Icons.Filled.Download, contentDescription = null, tint = LabGreen)
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Save TXT", color = LabGreen)
+                        Text("TXT", color = LabGreen)
                     }
                     OutlinedButton(
                         onClick = onExportCsv,
@@ -141,7 +145,17 @@ fun DiagnosticsScreen(
                     ) {
                         Icon(Icons.Filled.Download, contentDescription = null, tint = LabCyan)
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Save CSV", color = LabCyan)
+                        Text("CSV", color = LabCyan)
+                    }
+                    OutlinedButton(
+                        onClick = onExportJson,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("export_json_button")
+                    ) {
+                        Icon(Icons.Filled.Download, contentDescription = null, tint = LabBlue)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("JSON", color = LabBlue)
                     }
                 }
                 Spacer(modifier = Modifier.height(6.dp))
@@ -163,7 +177,17 @@ fun DiagnosticsScreen(
                     ) {
                         Icon(Icons.Filled.ContentCopy, contentDescription = null, tint = LabTextSecondary)
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Copy TXT", color = LabTextSecondary)
+                        Text("Copy", color = LabTextSecondary)
+                    }
+                    OutlinedButton(
+                        onClick = onShareTxt,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("share_txt_button")
+                    ) {
+                        Icon(Icons.Filled.Share, contentDescription = null, tint = LabCyan)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Share", color = LabCyan)
                     }
                 }
                 if (statusBanner != null) {

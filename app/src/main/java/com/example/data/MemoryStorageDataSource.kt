@@ -7,10 +7,14 @@ import android.os.StatFs
 import com.example.domain.BlockDeviceInfo
 import com.example.domain.CpuFreqParser
 import com.example.domain.DataSourceOrigin
+import com.example.domain.EmmcHardwareHealth
+import com.example.domain.EmmcHealthParser
 import com.example.domain.MemoryTelemetry
 import com.example.domain.MountPointInfo
+import com.example.domain.PartitionsParser
 import com.example.domain.StorageBenchmarkResult
 import com.example.domain.StorageTelemetry
+import com.example.domain.ZramParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -24,8 +28,14 @@ class MemoryStorageDataSource(
         val memInfo = ActivityManager.MemoryInfo()
         activityManager?.getMemoryInfo(memInfo)
 
-        val procMemRes = sysfsReader.readText("/proc/meminfo")
-        val procMap = CpuFreqParser.parseMemInfo(procMemRes.content)
+        val memBatch = sysfsReader.preloadBatchForRoot(
+            listOf("/proc/meminfo", "/sys/block/zram0/mm_stat")
+        )
+        val procMemRes = memBatch["/proc/meminfo"]
+        val procMap = CpuFreqParser.parseMemInfo(procMemRes?.content)
+
+        val zramRes = memBatch["/sys/block/zram0/mm_stat"]
+        val zramStats = ZramParser.parseMmStat(zramRes?.content)
 
         val totalBytes = procMap["MemTotal"] ?: memInfo.totalMem
         val availBytes = procMap["MemAvailable"] ?: memInfo.availMem
@@ -35,6 +45,9 @@ class MemoryStorageDataSource(
         val buffersBytes = procMap["Buffers"]
         val swapTotalBytes = procMap["SwapTotal"]
         val swapFreeBytes = procMap["SwapFree"]
+        val dirtyBytes = procMap["Dirty"]
+        val slabBytes = procMap["Slab"]
+        val pageTablesBytes = procMap["PageTables"]
 
         val utilPercent = if (totalBytes > 0L) {
             ((usedBytes.toDouble() / totalBytes.toDouble()) * 100.0).coerceIn(0.0, 100.0)
@@ -44,7 +57,8 @@ class MemoryStorageDataSource(
 
         val sources = buildList {
             if (activityManager != null) add(DataSourceOrigin.ACTIVITY_MANAGER)
-            if (procMap.isNotEmpty()) add(sysfsReader.resolveSource(DataSourceOrigin.PROCFS, procMemRes.usedRoot))
+            if (procMap.isNotEmpty()) add(sysfsReader.resolveSource(DataSourceOrigin.PROCFS, procMemRes?.usedRoot == true))
+            if (zramStats != null) add(sysfsReader.resolveSource(DataSourceOrigin.SYSFS_BLOCK, zramRes?.usedRoot == true))
         }.ifEmpty { listOf(DataSourceOrigin.UNAVAILABLE) }
 
         val interpretation = buildMemoryInterpretation(
@@ -69,7 +83,14 @@ class MemoryStorageDataSource(
             isLowMemory = memInfo.lowMemory,
             thresholdBytes = memInfo.threshold,
             interpretation = interpretation,
-            sources = sources
+            sources = sources,
+            dirtyBytes = dirtyBytes,
+            slabBytes = slabBytes,
+            pageTablesBytes = pageTablesBytes,
+            zramOrigDataBytes = zramStats?.origDataBytes,
+            zramComprDataBytes = zramStats?.comprDataBytes,
+            zramMemUsedBytes = zramStats?.memUsedTotalBytes,
+            zramCompressionRatio = zramStats?.ratio
         )
     }
 
@@ -86,10 +107,27 @@ class MemoryStorageDataSource(
                 0.0
             }
 
-            val mountsRes = sysfsReader.readText("/proc/mounts")
-            val mounts = parseMounts(mountsRes.content)
+            val mmcBase = "/sys/block/mmcblk0/device"
+            val storageBatch = sysfsReader.preloadBatchForRoot(
+                listOf(
+                    "/proc/mounts",
+                    "/proc/partitions",
+                    "$mmcBase/name",
+                    "$mmcBase/manfid",
+                    "$mmcBase/oemid",
+                    "$mmcBase/hwrev",
+                    "$mmcBase/fwrev",
+                    "$mmcBase/life_time",
+                    "$mmcBase/pre_eol_info"
+                )
+            )
+
+            val mounts = parseMounts(storageBatch["/proc/mounts"]?.content)
             val primaryMount = mounts.firstOrNull { it.mountPoint == "/data" }
                 ?: mounts.firstOrNull { it.mountPoint == "/" }
+
+            val partitions = PartitionsParser.parseProcPartitions(storageBatch["/proc/partitions"]?.content)
+            val emmcHealth = parseEmmcHealth(mmcBase, storageBatch)
 
             val blockDevices = scanBlockDevices()
             val diagnosticNote = buildStorageDiagnostic(usagePct, primaryMount?.fsType)
@@ -103,9 +141,48 @@ class MemoryStorageDataSource(
                 mounts = mounts.take(24),
                 blockDevices = blockDevices,
                 diagnosticNote = diagnosticNote,
-                lastBenchmark = lastBenchmark
+                lastBenchmark = lastBenchmark,
+                partitions = partitions,
+                emmcHealth = emmcHealth
             )
         }
+
+    private fun parseEmmcHealth(
+        mmcBase: String,
+        batch: Map<String, ReadResult>
+    ): EmmcHardwareHealth? {
+        val devName = batch["$mmcBase/name"]?.content?.takeIf { it.isNotBlank() }
+        val manfId = batch["$mmcBase/manfid"]?.content?.takeIf { it.isNotBlank() }
+        val oemId = batch["$mmcBase/oemid"]?.content?.takeIf { it.isNotBlank() }
+        val hwRev = batch["$mmcBase/hwrev"]?.content?.takeIf { it.isNotBlank() }
+        val fwRev = batch["$mmcBase/fwrev"]?.content?.takeIf { it.isNotBlank() }
+        val lifeTimeRaw = batch["$mmcBase/life_time"]?.content?.trim()
+        val preEolRaw = batch["$mmcBase/pre_eol_info"]?.content?.trim()
+
+        if (listOf(devName, manfId, oemId, lifeTimeRaw, preEolRaw).all { it == null }) {
+            return null
+        }
+
+        val lifeTokens = lifeTimeRaw?.split(Regex("\\s+")) ?: emptyList()
+        val lifeA = EmmcHealthParser.decodeLifeTimeHex(lifeTokens.getOrNull(0))
+        val lifeB = EmmcHealthParser.decodeLifeTimeHex(lifeTokens.getOrNull(1))
+        val (preEolLabel, preEolSev) = EmmcHealthParser.decodePreEol(preEolRaw)
+        val usedRoot = listOf("name", "manfid", "oemid", "hwrev", "fwrev", "life_time", "pre_eol_info")
+            .any { batch["$mmcBase/$it"]?.usedRoot == true }
+
+        return EmmcHardwareHealth(
+            deviceName = devName,
+            manfId = manfId,
+            oemId = oemId,
+            hwRev = hwRev,
+            fwRev = fwRev,
+            lifeTimeTypeA = lifeA,
+            lifeTimeTypeB = lifeB,
+            preEolStatus = preEolLabel,
+            preEolSeverity = preEolSev,
+            source = sysfsReader.resolveSource(DataSourceOrigin.SYSFS_MMC, usedRoot)
+        )
+    }
 
     private fun parseMounts(raw: String?): List<MountPointInfo> {
         if (raw.isNullOrBlank()) return emptyList()

@@ -32,17 +32,12 @@ object PowerCalculator {
 
 object BatteryHealthEstimator {
 
-    /**
-     * Estimates capacity retention percentage from kernel charge_full and charge_full_design.
-     * Returns null if either value is unavailable or non-positive.
-     */
     fun estimate(chargeFullMah: Double?, chargeFullDesignMah: Double?): BatteryHealthEstimation? {
         if (chargeFullMah == null || chargeFullDesignMah == null) return null
         if (!chargeFullMah.isFinite() || !chargeFullDesignMah.isFinite()) return null
         if (chargeFullMah <= 0.0 || chargeFullDesignMah <= 0.0) return null
 
         val ratio = (chargeFullMah / chargeFullDesignMah) * 100.0
-        // Ignore implausible kernel garbage (> 130% or < 5%)
         if (ratio < 5.0 || ratio > 130.0) return null
 
         return BatteryHealthEstimation(
@@ -53,6 +48,44 @@ object BatteryHealthEstimator {
     }
 }
 
+object DrainRateCalculator {
+
+    /**
+     * Estimates live %/hour charge or drain rate from battery current (mA) and design/full capacity (mAh).
+     * Positive = charging %/h, Negative = discharging %/h.
+     */
+    fun estimatePctPerHourFromCurrent(
+        currentMa: Double?,
+        isCharging: Boolean,
+        capacityMah: Double?
+    ): Double? {
+        if (currentMa == null || capacityMah == null || capacityMah <= 0.0) return null
+        if (!currentMa.isFinite() || !capacityMah.isFinite()) return null
+        val magMa = abs(currentMa)
+        if (magMa < 1.0) return 0.0
+        val rate = (magMa / capacityMah) * 100.0
+        return if (isCharging) rate else -rate
+    }
+
+    fun estimateRemainingTimeLabel(
+        percentage: Int?,
+        isCharging: Boolean,
+        ratePctPerHour: Double?
+    ): String? {
+        if (percentage == null || ratePctPerHour == null) return null
+        val absRate = abs(ratePctPerHour)
+        if (absRate < 0.5) return null
+        val remainingPct = if (isCharging) (100 - percentage).coerceAtLeast(0) else percentage.coerceAtLeast(0)
+        if (remainingPct == 0) return if (isCharging) "Full" else "0m"
+        val hours = remainingPct / absRate
+        val totalMinutes = (hours * 60.0).toInt().coerceIn(1, 2400)
+        val h = totalMinutes / 60
+        val m = totalMinutes % 60
+        val prefix = if (isCharging) "Est. full in " else "Est. empty in "
+        return if (h > 0) "$prefix${h}h ${m}m" else "$prefix${m}m"
+    }
+}
+
 object ThermalParser {
 
     data class ParsedTemperature(
@@ -60,18 +93,12 @@ object ThermalParser {
         val detectedUnit: String
     )
 
-    /**
-     * Parses Linux thermal sysfs or power_supply temp values into Celsius.
-     * Rejects known invalid sentinel values (-273000, -40000, 255000, etc.).
-     */
     fun parseTemperatureCelsius(raw: Long, isBatteryPowerSupplyTemp: Boolean = false): ParsedTemperature? {
-        // Common disconnected / sentinel readings in Qualcomm kernels
         if (raw == -273000L || raw == -273L || raw == -40000L || raw == -400L || raw >= 200_000L) {
             return null
         }
         val absRaw = abs(raw)
         if (isBatteryPowerSupplyTemp) {
-            // Linux power_supply/battery/temp is standard tenths of a degree C (e.g., 345 = 34.5 C)
             return when {
                 absRaw >= 1000L -> {
                     val c = raw / 1000.0
@@ -88,7 +115,6 @@ object ThermalParser {
             }
         }
 
-        // Standard /sys/class/thermal/thermal_zone*/temp is millidegrees Celsius (e.g. 42500 -> 42.5 C)
         return when {
             absRaw >= 1_500L -> {
                 val c = raw / 1000.0
@@ -243,5 +269,107 @@ object CpuFreqParser {
             }
         }
         return map
+    }
+
+    /**
+     * Parses Linux cpufreq/stats/time_in_state (`<freq_khz> <centiseconds>`).
+     */
+    fun parseTimeInState(raw: String?): List<CpuFrequencyResidency> {
+        if (raw.isNullOrBlank()) return emptyList()
+        val rawPairs = raw.lineSequence().mapNotNull { line ->
+            val parts = line.trim().split(Regex("\\s+"))
+            if (parts.size >= 2) {
+                val freqKhz = parts[0].toLongOrNull()
+                val ticks10ms = parts[1].toLongOrNull()
+                if (freqKhz != null && ticks10ms != null && freqKhz > 0L && ticks10ms >= 0L) {
+                    val mhz = UnitConverter.frequencyToMhz(freqKhz)?.value ?: return@mapNotNull null
+                    mhz to (ticks10ms * 10L)
+                } else null
+            } else null
+        }.toList()
+
+        val totalMs = rawPairs.sumOf { it.second }
+        if (totalMs <= 0L) return emptyList()
+
+        return rawPairs.map { (mhz, ms) ->
+            CpuFrequencyResidency(
+                freqMhz = mhz,
+                timeMs = ms,
+                percent = (ms.toDouble() / totalMs.toDouble()) * 100.0
+            )
+        }
+    }
+}
+
+object ZramParser {
+    data class ZramStats(
+        val origDataBytes: Long,
+        val comprDataBytes: Long,
+        val memUsedTotalBytes: Long,
+        val ratio: Double?
+    )
+
+    /**
+     * Parses `/sys/block/zram0/mm_stat` (orig_data_size compr_data_size mem_used_total ...).
+     */
+    fun parseMmStat(raw: String?): ZramStats? {
+        if (raw.isNullOrBlank()) return null
+        val nums = raw.trim().split(Regex("\\s+")).mapNotNull { it.toLongOrNull() }
+        if (nums.size < 3) return null
+        val orig = nums[0]
+        val compr = nums[1]
+        val memUsed = nums[2]
+        val ratio = if (orig > 0L && compr > 0L) orig.toDouble() / compr.toDouble() else null
+        return ZramStats(orig, compr, memUsed, ratio)
+    }
+}
+
+object PartitionsParser {
+    fun parseProcPartitions(raw: String?): List<PartitionInfo> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return raw.lineSequence().drop(2).mapNotNull { line ->
+            val parts = line.trim().split(Regex("\\s+"))
+            if (parts.size >= 4) {
+                val major = parts[0].toIntOrNull()
+                val minor = parts[1].toIntOrNull()
+                val blocks = parts[2].toLongOrNull()
+                val name = parts[3]
+                if (major != null && minor != null && blocks != null) {
+                    PartitionInfo(major, minor, blocks, name)
+                } else null
+            } else null
+        }.toList()
+    }
+}
+
+object EmmcHealthParser {
+    /**
+     * Parses JEDEC eMMC 5.0+ `life_time` node (two hex bytes: `0x01 0x02`).
+     */
+    fun decodeLifeTimeHex(hexToken: String?): String? {
+        if (hexToken.isNullOrBlank()) return null
+        val code = hexToken.trim().removePrefix("0x").removePrefix("0X").toIntOrNull(16) ?: return null
+        return when (code) {
+            0x00 -> "Not defined"
+            in 0x01..0x0A -> {
+                val low = (code - 1) * 10
+                val high = code * 10
+                "$low% - $high% wear used"
+            }
+            0x0B -> ">100% (Exceeded max estimated life)"
+            else -> "Code 0x${code.toString(16)}"
+        }
+    }
+
+    fun decodePreEol(raw: String?): Pair<String?, HealthSeverity> {
+        if (raw.isNullOrBlank()) return null to HealthSeverity.UNAVAILABLE
+        val code = raw.trim().removePrefix("0x").removePrefix("0X").toIntOrNull(16)
+            ?: return raw.trim() to HealthSeverity.UNAVAILABLE
+        return when (code) {
+            0x01 -> "Normal (< 80% reserved blocks used)" to HealthSeverity.NORMAL
+            0x02 -> "Warning (~80% reserved blocks consumed)" to HealthSeverity.WARNING
+            0x03 -> "Urgent (>90% reserved blocks consumed)" to HealthSeverity.CRITICAL
+            else -> "Not defined (0x${code.toString(16)})" to HealthSeverity.UNAVAILABLE
+        }
     }
 }

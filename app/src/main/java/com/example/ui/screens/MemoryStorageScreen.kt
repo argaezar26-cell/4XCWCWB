@@ -30,9 +30,11 @@ import com.example.ui.components.LabCard
 import com.example.ui.components.MetricTile
 import com.example.ui.components.RealTimeLineChart
 import com.example.ui.components.SectionHeader
+import com.example.ui.components.SourceOriginTag
 import com.example.ui.components.StatusPill
 import com.example.ui.components.TelemetryRow
 import com.example.ui.components.UsageProgressBar
+import com.example.ui.components.severityColor
 import com.example.ui.theme.LabAmber
 import com.example.ui.theme.LabBackground
 import com.example.ui.theme.LabCyan
@@ -104,11 +106,24 @@ fun MemoryStorageScreen(
                 TelemetryRow(label = "Cached RAM (Reclaimable)", value = FormatUtils.formatBytes(memory.cachedRamBytes))
                 TelemetryRow(label = "Buffers", value = FormatUtils.formatBytes(memory.buffersBytes))
                 TelemetryRow(label = "Free RAM (Unallocated)", value = FormatUtils.formatBytes(memory.freeRamBytes))
+                TelemetryRow(label = "Kernel Slab / PageTables", value = "${FormatUtils.formatBytes(memory.slabBytes)} / ${FormatUtils.formatBytes(memory.pageTablesBytes)}")
+                TelemetryRow(label = "Dirty Pages", value = FormatUtils.formatBytes(memory.dirtyBytes))
                 val swapText = if (memory.swapTotalBytes != null && memory.swapTotalBytes > 0L) {
                     val swapUsed = (memory.swapTotalBytes - (memory.swapFreeBytes ?: 0L)).coerceAtLeast(0L)
                     "${FormatUtils.formatBytes(swapUsed)} / ${FormatUtils.formatBytes(memory.swapTotalBytes)}"
                 } else "Unavailable / Disabled"
                 TelemetryRow(label = "zRAM / Swap Usage", value = swapText)
+                if (memory.zramOrigDataBytes != null || memory.zramCompressionRatio != null) {
+                    TelemetryRow(
+                        label = "zRAM Orig -> Compr (Ratio)",
+                        value = "${FormatUtils.formatBytes(memory.zramOrigDataBytes)} -> ${FormatUtils.formatBytes(memory.zramComprDataBytes)} (${FormatUtils.formatDecimal(memory.zramCompressionRatio, 2, "x")})",
+                        valueColor = LabCyan
+                    )
+                    TelemetryRow(
+                        label = "zRAM Total Mem Used",
+                        value = FormatUtils.formatBytes(memory.zramMemUsedBytes)
+                    )
+                }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = memory.interpretation,
@@ -223,6 +238,32 @@ fun MemoryStorageScreen(
             }
         }
 
+        storage.emmcHealth?.let { emmc ->
+            item {
+                val eolColor = severityColor(emmc.preEolSeverity)
+                LabCard(borderColor = eolColor.copy(alpha = 0.5f)) {
+                    SectionHeader(
+                        title = "eMMC Flash Hardware Health (JEDEC)",
+                        subtitle = "/sys/block/mmcblk0/device/",
+                        trailing = {
+                            StatusPill(
+                                label = emmc.preEolSeverity.name,
+                                color = eolColor
+                            )
+                        }
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TelemetryRow(label = "Flash Chip Name", value = emmc.deviceName ?: "N/A", valueColor = LabCyan)
+                    TelemetryRow(label = "Manf / OEM ID", value = "${emmc.manfId ?: "N/A"} / ${emmc.oemId ?: "N/A"}")
+                    TelemetryRow(label = "HW / FW Rev", value = "${emmc.hwRev ?: "N/A"} / ${emmc.fwRev ?: "N/A"}")
+                    TelemetryRow(label = "Pre-EOL Status", value = emmc.preEolStatus ?: "UNAVAILABLE", valueColor = eolColor)
+                    TelemetryRow(label = "Wear Level Type A (SLC)", value = emmc.lifeTimeTypeA ?: "UNAVAILABLE")
+                    TelemetryRow(label = "Wear Level Type B (MLC/TLC)", value = emmc.lifeTimeTypeB ?: "UNAVAILABLE")
+                    SourceOriginTag(source = emmc.source, nodePath = "/sys/block/mmcblk0/device/")
+                }
+            }
+        }
+
         if (storage.blockDevices.isNotEmpty()) {
             item {
                 SectionHeader(
@@ -248,6 +289,25 @@ fun MemoryStorageScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = LabTextMuted
                     )
+                }
+            }
+        }
+
+        if (storage.partitions.isNotEmpty()) {
+            item {
+                SectionHeader(
+                    title = "Kernel Partitions (/proc/partitions)",
+                    subtitle = "${storage.partitions.size} PARTITIONS"
+                )
+            }
+            item {
+                LabCard {
+                    storage.partitions.take(20).forEach { part ->
+                        TelemetryRow(
+                            label = "${part.name} (${part.major}:${part.minor})",
+                            value = FormatUtils.formatBytes(part.blocksKb * 1024L)
+                        )
+                    }
                 }
             }
         }

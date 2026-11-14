@@ -9,6 +9,7 @@ import com.example.domain.BatteryTelemetry
 import com.example.domain.ChargingSessionRecord
 import com.example.domain.ChargingTelemetry
 import com.example.domain.DataSourceOrigin
+import com.example.domain.DrainRateCalculator
 import com.example.domain.HealthSeverity
 import com.example.domain.PowerCalculator
 import com.example.domain.PowerSupplyNodeInfo
@@ -257,6 +258,51 @@ class BatteryAndChargingDataSource(
             voltageMv = voltageMv.value
         )
 
+        val chargeType = when {
+            !batteryNode?.chargeType.isNullOrBlank() -> SourcedValue(
+                batteryNode?.chargeType, "", batteryNode?.sourceOrigin ?: DataSourceOrigin.SYSFS_BATTERY, "${batteryNode?.path}/charge_type"
+            )
+            !usbNode?.chargeType.isNullOrBlank() -> SourcedValue(
+                usbNode?.chargeType, "", usbNode?.sourceOrigin ?: DataSourceOrigin.SYSFS_USB, "${usbNode?.path}/charge_type"
+            )
+            !acOrMainsNode?.chargeType.isNullOrBlank() -> SourcedValue(
+                acOrMainsNode?.chargeType, "", acOrMainsNode?.sourceOrigin ?: DataSourceOrigin.SYSFS_POWER_SUPPLY, "${acOrMainsNode?.path}/charge_type"
+            )
+            else -> SourcedValue(null, "", DataSourceOrigin.UNAVAILABLE)
+        }
+
+        val internalResistanceMohm = when {
+            batteryNode?.resistanceMohm != null -> SourcedValue(
+                batteryNode.resistanceMohm, "mΩ", batteryNode.sourceOrigin, "${batteryNode.path}/resistance"
+            )
+            bmsNode?.resistanceMohm != null -> SourcedValue(
+                bmsNode.resistanceMohm, "mΩ", bmsNode.sourceOrigin, "${bmsNode.path}/resistance"
+            )
+            else -> SourcedValue(null, "mΩ", DataSourceOrigin.UNAVAILABLE)
+        }
+
+        val voltageMaxDesignMv = when {
+            batteryNode?.voltageMaxMv != null -> SourcedValue(
+                batteryNode.voltageMaxMv, "mV", batteryNode.sourceOrigin, "${batteryNode.path}/voltage_max_design"
+            )
+            bmsNode?.voltageMaxMv != null -> SourcedValue(
+                bmsNode.voltageMaxMv, "mV", bmsNode.sourceOrigin, "${bmsNode.path}/voltage_max_design"
+            )
+            else -> SourcedValue(null, "mV", DataSourceOrigin.UNAVAILABLE)
+        }
+
+        val effectiveCapacityMah = chargeFullMah.value ?: chargeFullDesignMah.value
+        val drainOrChargeRate = DrainRateCalculator.estimatePctPerHourFromCurrent(
+            currentMa = currentNowMa.value,
+            isCharging = isCharging,
+            capacityMah = effectiveCapacityMah
+        )
+        val estimatedTimeLabel = DrainRateCalculator.estimateRemainingTimeLabel(
+            percentage = percentage.value,
+            isCharging = isCharging,
+            ratePctPerHour = drainOrChargeRate
+        )
+
         val batteryTelemetry = BatteryTelemetry(
             percentage = percentage,
             voltageMv = voltageMv,
@@ -274,7 +320,12 @@ class BatteryAndChargingDataSource(
             cycleCount = cycleCount,
             estimatedHealth = estimatedHealth,
             detectedPowerSupplies = supplies,
-            severity = batterySeverity
+            severity = batterySeverity,
+            chargeType = chargeType,
+            internalResistanceMohm = internalResistanceMohm,
+            voltageMaxDesignMv = voltageMaxDesignMv,
+            drainOrChargeRatePctPerHour = drainOrChargeRate,
+            estimatedTimeLabel = estimatedTimeLabel
         )
 
         // Charging Telemetry: STRICT separation of USB input rail vs Battery rail
@@ -369,7 +420,8 @@ class BatteryAndChargingDataSource(
             "type", "online", "present", "status", "health", "technology",
             "capacity", "voltage_now", "current_now", "current_avg",
             "input_current_now", "temp", "charge_counter", "charge_full",
-            "charge_full_design", "cycle_count", "voltage_max", "current_max"
+            "charge_full_design", "cycle_count", "voltage_max", "voltage_max_design",
+            "current_max", "charge_type", "resistance"
         )
         val allPaths = entries.flatMap { name ->
             candidateFiles.map { file -> "$baseDir/$name/$file" }
@@ -408,8 +460,12 @@ class BatteryAndChargingDataSource(
             val chargeFull = readNum("charge_full")?.let { UnitConverter.toMilliampHours(it)?.value }
             val chargeFullDesign = readNum("charge_full_design")?.let { UnitConverter.toMilliampHours(it)?.value }
             val cycleCount = readNum("cycle_count")?.toInt()?.takeIf { it >= 0 }
-            val voltageMax = readNum("voltage_max")?.let { UnitConverter.toMillivolts(it)?.value }
+            val voltageMax = (readNum("voltage_max_design") ?: readNum("voltage_max"))?.let { UnitConverter.toMillivolts(it)?.value }
             val currentMax = readNum("current_max")?.let { UnitConverter.toMilliamperes(it).value }
+            val chargeType = readStr("charge_type")
+            val resistanceMohm = readNum("resistance")?.takeIf { it > 0L }?.let { raw ->
+                if (raw >= 1000L) raw / 1000.0 else raw.toDouble()
+            }
 
             val defaultOrigin = when {
                 type.equals("Battery", ignoreCase = true) || name.equals("battery", ignoreCase = true) -> DataSourceOrigin.SYSFS_BATTERY
@@ -438,6 +494,8 @@ class BatteryAndChargingDataSource(
                 cycleCount = cycleCount,
                 voltageMaxMv = voltageMax,
                 currentMaxMa = currentMax,
+                chargeType = chargeType,
+                resistanceMohm = resistanceMohm,
                 sourceOrigin = sysfsReader.resolveSource(defaultOrigin, usedRoot)
             )
         }
