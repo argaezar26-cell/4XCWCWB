@@ -8,13 +8,15 @@ import com.example.root.RootProbeResult
 import com.example.root.RootShellManager
 import com.example.sensors.DeviceSensorManager
 import com.example.utils.StorageBenchmark
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 
 interface HardwareRepository {
-    suspend fun collectSnapshot(forceRootProbe: Boolean = false): HardwareSnapshot
+    suspend fun collectSnapshot(allowRootProbe: Boolean = false, forceRootProbe: Boolean = false): HardwareSnapshot
     suspend fun reProbeRoot(): RootProbeResult
     suspend fun runStorageBenchmark(payloadMb: Int = 4): StorageBenchmarkResult
-    fun observeLiveSensors(): Flow<Map<Int, LiveSensorSample>>
+    fun observeLiveSensors(): kotlinx.coroutines.flow.Flow<Map<Int, LiveSensorSample>>
     fun resetThermalPeak()
 }
 
@@ -33,21 +35,51 @@ class HardwareRepositoryImpl(
     @Volatile
     private var lastBenchmarkResult: StorageBenchmarkResult? = null
 
-    override suspend fun collectSnapshot(forceRootProbe: Boolean): HardwareSnapshot {
-        val (battery, charging) = batteryAndChargingDataSource.readTelemetry()
-        val thermal = thermalDataSource.readTelemetry(battery.temperatureC.value)
-        val cpu = cpuGpuDataSource.readCpuTelemetry()
-        val gpu = cpuGpuDataSource.readGpuTelemetry()
-        val memory = memoryStorageDataSource.readMemoryTelemetry()
-        val storage = memoryStorageDataSource.readStorageTelemetry(lastBenchmarkResult)
-        val sensors = deviceSensorManager.getSensorInventory()
+    override suspend fun collectSnapshot(
+        allowRootProbe: Boolean,
+        forceRootProbe: Boolean
+    ): HardwareSnapshot = coroutineScope {
+        val batteryDeferred = async {
+            batteryAndChargingDataSource.readTelemetry()
+        }
+        val cpuDeferred = async {
+            cpuGpuDataSource.readCpuTelemetry()
+        }
+        val gpuDeferred = async {
+            withTimeoutOrNull(1500L) {
+                cpuGpuDataSource.readGpuTelemetry()
+            } ?: cpuGpuDataSource.fallbackGpuTelemetry()
+        }
+        val memoryDeferred = async {
+            memoryStorageDataSource.readMemoryTelemetry()
+        }
+        val storageDeferred = async {
+            memoryStorageDataSource.readStorageTelemetry(lastBenchmarkResult)
+        }
+        val sensorsDeferred = async {
+            deviceSensorManager.getSensorInventory()
+        }
+
+        val (battery, charging) = batteryDeferred.await()
+        val thermalDeferred = async {
+            thermalDataSource.readTelemetry(battery.temperatureC.value)
+        }
+
+        val cpu = cpuDeferred.await()
+        val gpu = gpuDeferred.await()
+        val memory = memoryDeferred.await()
+        val storage = storageDeferred.await()
+        val sensors = sensorsDeferred.await()
+        val thermal = thermalDeferred.await()
+
         val kernelSystem = kernelSystemDataSource.readKernelSystemInfo(
             availableGovernors = cpu.availableGovernors,
             availableFrequenciesMhz = cpu.availableFrequenciesMhz,
+            allowRootProbe = allowRootProbe,
             forceRootProbe = forceRootProbe
         )
 
-        return HardwareSnapshot(
+        HardwareSnapshot(
             timestampMs = System.currentTimeMillis(),
             battery = battery,
             charging = charging,
@@ -71,7 +103,7 @@ class HardwareRepositoryImpl(
         return result
     }
 
-    override fun observeLiveSensors(): Flow<Map<Int, LiveSensorSample>> {
+    override fun observeLiveSensors(): kotlinx.coroutines.flow.Flow<Map<Int, LiveSensorSample>> {
         return deviceSensorManager.observeLiveSensors()
     }
 

@@ -469,7 +469,9 @@ fun HardwareLabApp(
                         val snapshot = state.snapshot
                         if (snapshot == null) {
                             Column(
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(24.dp),
                                 verticalArrangement = Arrangement.Center,
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
@@ -480,6 +482,14 @@ fun HardwareLabApp(
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = LabTextSecondary
                                 )
+                                if (state.lastError != null) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "Last read error: ${state.lastError}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = LabAmber
+                                    )
+                                }
                             }
                         } else {
                             Box(

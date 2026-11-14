@@ -4,6 +4,7 @@ import com.example.domain.RootStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Collections
 import java.util.concurrent.TimeUnit
 
 data class RootProbeResult(
@@ -23,7 +24,7 @@ data class RootCommandResult(
  * - Probes actual root execution via `su -c id` (never assumes file existence = root granted).
  * - Enforces an explicit allowlist of read-only paths and commands.
  * - Rejects any write, redirect, pipe, or traversal attempt.
- * - Applies strict process timeouts and output bounds.
+ * - Applies strict process timeouts, stream draining (no pipe deadlock), and output bounds.
  */
 object RootCommandAllowlist {
 
@@ -104,12 +105,14 @@ class RootShellManager {
         private set
 
     @Volatile
-    var cachedProbeDetail: String = "Not probed yet"
+    var cachedProbeDetail: String = "Pending root verification..."
         private set
 
     @Volatile
     var cachedMagiskVersion: String? = null
         private set
+
+    private val missingRootPaths: MutableSet<String> = Collections.synchronizedSet(HashSet())
 
     suspend fun probeRootAccess(forceRefresh: Boolean = false): RootProbeResult = withContext(Dispatchers.IO) {
         if (!forceRefresh && cachedStatus != null) {
@@ -120,7 +123,11 @@ class RootShellManager {
             )
         }
 
-        val probeExec = executeRawSu("id", timeoutMs = 2000L)
+        if (forceRefresh) {
+            missingRootPaths.clear()
+        }
+
+        val probeExec = executeRawSu("id", timeoutMs = 4000L)
         val status: RootStatus
         val detail: String
 
@@ -131,15 +138,15 @@ class RootShellManager {
             }
             probeExec.timedOut -> {
                 status = RootStatus.ROOT_DENIED
-                detail = "su -c id timed out after 2000ms (root prompt dismissed or hung)."
+                detail = "su -c id timed out (root prompt dismissed or hung)."
             }
-            probeExec.exitCode == 0 && probeExec.stdout.contains("uid=0") -> {
+            probeExec.exitCode == 0 && probeExec.output.contains("uid=0") -> {
                 status = RootStatus.ROOT_AVAILABLE
-                detail = probeExec.stdout.trim().ifBlank { "uid=0(root)" }
+                detail = probeExec.output.trim().ifBlank { "uid=0(root)" }
             }
             else -> {
                 status = RootStatus.ROOT_DENIED
-                val msg = probeExec.stderr.ifBlank { probeExec.stdout }.trim()
+                val msg = probeExec.output.trim()
                 detail = if (msg.isNotBlank()) "su denied (${probeExec.exitCode}): $msg" else "su exited with code ${probeExec.exitCode}"
             }
         }
@@ -161,10 +168,82 @@ class RootShellManager {
         if (cachedStatus != RootStatus.ROOT_AVAILABLE) {
             return@withContext RootCommandResult(false, null, "Root not available")
         }
+        if (path in missingRootPaths) {
+            return@withContext RootCommandResult(false, null, "Cached missing path")
+        }
         if (!RootCommandAllowlist.isSafePath(path)) {
             return@withContext RootCommandResult(false, null, "Path blocked by read-only allowlist")
         }
-        executeAllowlisted("cat $path")
+        val res = executeAllowlisted("cat $path")
+        if (!res.success || res.output.isNullOrBlank()) {
+            missingRootPaths.add(path)
+        }
+        res
+    }
+
+    /**
+     * Reads multiple allowlisted sysfs/procfs files in a SINGLE read-only `su` call
+     * to avoid spawning hundreds of `su` processes per refresh tick.
+     */
+    suspend fun readAllowlistedBatch(paths: List<String>): Map<String, String> = withContext(Dispatchers.IO) {
+        if (cachedStatus != RootStatus.ROOT_AVAILABLE || paths.isEmpty()) {
+            return@withContext emptyMap()
+        }
+        val safePaths = paths
+            .distinct()
+            .filter { it !in missingRootPaths && RootCommandAllowlist.isSafePath(it) }
+
+        if (safePaths.isEmpty()) return@withContext emptyMap()
+
+        val results = LinkedHashMap<String, String>()
+        // Chunk to keep command line short and bounded
+        safePaths.chunked(35).forEach { chunk ->
+            val script = chunk.joinToString("; ") { p ->
+                "if [ -r '$p' ]; then echo '__HWLAB_BEGIN__$p'; head -c 4096 '$p' 2>/dev/null; echo ''; echo '__HWLAB_END__'; fi"
+            }
+            val execRes = executeRawSu(script, timeoutMs = 2500L)
+            if (execRes.exitCode == 0 && !execRes.timedOut && execRes.output.isNotBlank()) {
+                val parsed = parseBatchOutput(execRes.output)
+                results.putAll(parsed)
+                chunk.forEach { p ->
+                    if (p !in parsed) {
+                        missingRootPaths.add(p)
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    private fun parseBatchOutput(raw: String): Map<String, String> {
+        val map = LinkedHashMap<String, String>()
+        var currentPath: String? = null
+        val buffer = StringBuilder()
+
+        raw.lineSequence().forEach { line ->
+            when {
+                line.startsWith("__HWLAB_BEGIN__") -> {
+                    currentPath = line.removePrefix("__HWLAB_BEGIN__").trim()
+                    buffer.clear()
+                }
+                line == "__HWLAB_END__" -> {
+                    val path = currentPath
+                    if (path != null) {
+                        val content = buffer.toString().trim()
+                        if (content.isNotEmpty()) {
+                            map[path] = content
+                        }
+                    }
+                    currentPath = null
+                    buffer.clear()
+                }
+                currentPath != null -> {
+                    if (buffer.isNotEmpty()) buffer.append('\n')
+                    buffer.append(line)
+                }
+            }
+        }
+        return map
     }
 
     suspend fun listAllowlistedDir(path: String): List<String>? = withContext(Dispatchers.IO) {
@@ -184,26 +263,24 @@ class RootShellManager {
         }
         val res = executeRawSu(command.trim(), timeoutMs = 2000L)
         if (res.exitCode == 0 && !res.timedOut && !res.binaryMissing) {
-            RootCommandResult(true, res.stdout.trimEnd(), null)
+            RootCommandResult(true, res.output.trimEnd(), null)
         } else {
-            RootCommandResult(false, null, res.stderr.ifBlank { "Exit ${res.exitCode}" })
+            RootCommandResult(false, null, res.output.ifBlank { "Exit ${res.exitCode}" })
         }
     }
 
     private fun detectMagiskVersion(): String? {
-        val ver = executeRawSu("magisk -v", timeoutMs = 1500L)
-        val code = executeRawSu("magisk -V", timeoutMs = 1500L)
-        val verStr = if (ver.exitCode == 0) ver.stdout.trim() else ""
-        val codeStr = if (code.exitCode == 0) code.stdout.trim() else ""
+        val ver = executeRawSu("magisk -v; magisk -V", timeoutMs = 1500L)
+        if (ver.exitCode != 0 || ver.timedOut) return null
+        val lines = ver.output.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
         return when {
-            verStr.isNotBlank() && codeStr.isNotBlank() -> "$verStr ($codeStr)"
-            verStr.isNotBlank() -> verStr
+            lines.size >= 2 -> "${lines[0]} (${lines[1]})"
+            lines.size == 1 -> lines[0]
             else -> null
         }
     }
 
     private fun detectMagiskNonRootArtifact(): String? {
-        // Non-root read-only check of Magisk app/environment markers without claiming root access
         val markers = listOf("/sbin/.magisk", "/data/adb/magisk", "/system/bin/magisk")
         val found = markers.firstOrNull { File(it).exists() }
         return found?.let { "Marker detected ($it) - root access required for version" }
@@ -211,8 +288,7 @@ class RootShellManager {
 
     private data class RawExecResult(
         val exitCode: Int,
-        val stdout: String,
-        val stderr: String,
+        val output: String,
         val timedOut: Boolean,
         val binaryMissing: Boolean
     )
@@ -220,28 +296,41 @@ class RootShellManager {
     private fun executeRawSu(command: String, timeoutMs: Long): RawExecResult {
         var process: Process? = null
         return try {
-            process = ProcessBuilder("su", "-c", command).start()
+            process = ProcessBuilder("su", "-c", command)
+                .redirectErrorStream(true)
+                .start()
+
+            val outputHolder = StringBuilder()
+            val readerThread = Thread {
+                try {
+                    process.inputStream.bufferedReader().use { reader ->
+                        val buf = CharArray(4096)
+                        var total = 0
+                        while (total < 65536) {
+                            val n = reader.read(buf)
+                            if (n <= 0) break
+                            outputHolder.appendRange(buf, 0, n)
+                            total += n
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            readerThread.isDaemon = true
+            readerThread.start()
+
             val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
             if (!finished) {
                 process.destroyForcibly()
-                return RawExecResult(-1, "", "Timeout", timedOut = true, binaryMissing = false)
+                readerThread.join(150)
+                return RawExecResult(-1, outputHolder.toString(), timedOut = true, binaryMissing = false)
             }
-            val maxBytes = 64 * 1024
-            val stdout = process.inputStream.bufferedReader().use { reader ->
-                val buf = CharArray(maxBytes)
-                val read = reader.read(buf)
-                if (read > 0) String(buf, 0, read) else ""
-            }
-            val stderr = process.errorStream.bufferedReader().use { reader ->
-                val buf = CharArray(8192)
-                val read = reader.read(buf)
-                if (read > 0) String(buf, 0, read) else ""
-            }
-            RawExecResult(process.exitValue(), stdout, stderr, timedOut = false, binaryMissing = false)
+            readerThread.join(300)
+            RawExecResult(process.exitValue(), outputHolder.toString(), timedOut = false, binaryMissing = false)
         } catch (e: java.io.IOException) {
-            RawExecResult(-1, "", e.message ?: "IO error", timedOut = false, binaryMissing = true)
+            RawExecResult(-1, e.message ?: "IO error", timedOut = false, binaryMissing = true)
         } catch (e: Exception) {
-            RawExecResult(-1, "", e.message ?: "Execution failed", timedOut = false, binaryMissing = false)
+            RawExecResult(-1, e.message ?: "Execution failed", timedOut = false, binaryMissing = false)
         } finally {
             try {
                 process?.destroy()

@@ -365,20 +365,31 @@ class BatteryAndChargingDataSource(
         val (entries, dirUsedRoot) = sysfsReader.listDirectory(baseDir)
         if (entries.isEmpty()) return emptyList()
 
-        return entries.mapNotNull { name ->
+        val candidateFiles = listOf(
+            "type", "online", "present", "status", "health", "technology",
+            "capacity", "voltage_now", "current_now", "current_avg",
+            "input_current_now", "temp", "charge_counter", "charge_full",
+            "charge_full_design", "cycle_count", "voltage_max", "current_max"
+        )
+        val allPaths = entries.flatMap { name ->
+            candidateFiles.map { file -> "$baseDir/$name/$file" }
+        }
+        val batch = sysfsReader.preloadBatchForRoot(allPaths)
+
+        return entries.map { name ->
             val path = "$baseDir/$name"
             var usedRoot = dirUsedRoot
 
-            suspend fun readStr(file: String): String? {
-                val res = sysfsReader.readText("$path/$file")
+            fun readStr(file: String): String? {
+                val res = batch["$path/$file"] ?: return null
                 if (res.usedRoot) usedRoot = true
                 return res.content
             }
 
-            suspend fun readNum(file: String): Long? {
-                val (num, r) = sysfsReader.readLong("$path/$file")
-                if (r) usedRoot = true
-                return num
+            fun readNum(file: String): Long? {
+                val res = batch["$path/$file"] ?: return null
+                if (res.usedRoot) usedRoot = true
+                return res.content?.trim()?.toLongOrNull()
             }
 
             val type = readStr("type")

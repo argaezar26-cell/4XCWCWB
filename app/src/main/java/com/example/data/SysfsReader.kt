@@ -12,8 +12,8 @@ data class ReadResult(
 
 /**
  * Safely reads Linux sysfs and procfs nodes via direct File I/O first,
- * falling back to read-only allowlisted root (`RootShellManager`) only if
- * root is already verified as ROOT_AVAILABLE and direct read fails due to SELinux/permissions.
+ * with batched read-only root fallback (via `RootShellManager`) to prevent
+ * spawning hundreds of `su` processes per refresh tick.
  */
 class SysfsReader(
     private val rootShellManager: RootShellManager
@@ -38,6 +38,29 @@ class SysfsReader(
         } catch (_: Exception) {
             null
         }
+    }
+
+    suspend fun preloadBatchForRoot(paths: List<String>): Map<String, ReadResult> {
+        val result = LinkedHashMap<String, ReadResult>()
+        val needRoot = mutableListOf<String>()
+
+        for (path in paths) {
+            val direct = readDirect(path)
+            if (direct != null) {
+                result[path] = ReadResult(direct, usedRoot = false)
+            } else {
+                needRoot.add(path)
+            }
+        }
+
+        if (needRoot.isNotEmpty() && rootShellManager.cachedStatus == RootStatus.ROOT_AVAILABLE) {
+            val rootValues = rootShellManager.readAllowlistedBatch(needRoot)
+            rootValues.forEach { (path, content) ->
+                result[path] = ReadResult(content, usedRoot = true)
+            }
+        }
+
+        return result
     }
 
     suspend fun readText(path: String, allowRootFallback: Boolean = true): ReadResult {

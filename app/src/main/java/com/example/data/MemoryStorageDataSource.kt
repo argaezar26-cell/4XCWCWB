@@ -138,21 +138,26 @@ class MemoryStorageDataSource(
             it.startsWith("mmcblk") || it.startsWith("sd") || it.startsWith("zram") || it.startsWith("dm-")
         }.take(12)
 
+        val blockFiles = listOf("size", "queue/rotational", "queue/scheduler")
+        val batch = sysfsReader.preloadBatchForRoot(
+            filtered.flatMap { name -> blockFiles.map { f -> "$baseDir/$name/$f" } }
+        )
+
         return filtered.map { name ->
             val path = "$baseDir/$name"
-            var usedRoot = dirUsedRoot
-            val (sectors, r1) = sysfsReader.readLong("$path/size")
-            if (r1) usedRoot = true
-            val (rotRaw, r2) = sysfsReader.readLong("$path/queue/rotational")
-            if (r2) usedRoot = true
-            val schedRes = sysfsReader.readText("$path/queue/scheduler")
-            if (schedRes.usedRoot) usedRoot = true
+            val r1 = batch["$path/size"]
+            val r2 = batch["$path/queue/rotational"]
+            val schedRes = batch["$path/queue/scheduler"]
+            val usedRoot = dirUsedRoot || r1?.usedRoot == true || r2?.usedRoot == true || schedRes?.usedRoot == true
+
+            val sectors = r1?.content?.trim()?.toLongOrNull()
+            val rotRaw = r2?.content?.trim()?.toLongOrNull()
 
             BlockDeviceInfo(
                 name = name,
                 sizeBytes = sectors?.let { it * 512L },
                 rotational = rotRaw?.let { it != 0L },
-                scheduler = schedRes.content,
+                scheduler = schedRes?.content,
                 source = sysfsReader.resolveSource(DataSourceOrigin.SYSFS_BLOCK, usedRoot)
             )
         }

@@ -31,22 +31,28 @@ class ThermalDataSource(
         val zoneNames = entries.filter { it.startsWith("thermal_zone") }
             .sortedBy { it.removePrefix("thermal_zone").toIntOrNull() ?: Int.MAX_VALUE }
 
+        val thermalFiles = listOf("type", "temp", "mode", "policy")
+        val batch = sysfsReader.preloadBatchForRoot(
+            zoneNames.flatMap { zn -> thermalFiles.map { f -> "$baseDir/$zn/$f" } }
+        )
+
         val zones = zoneNames.map { zoneName ->
             val zonePath = "$baseDir/$zoneName"
             var usedRoot = dirUsedRoot
 
-            val typeRes = sysfsReader.readText("$zonePath/type")
-            if (typeRes.usedRoot) usedRoot = true
-            val typeStr = typeRes.content?.takeIf { it.isNotBlank() } ?: zoneName
+            val typeRes = batch["$zonePath/type"]
+            if (typeRes?.usedRoot == true) usedRoot = true
+            val typeStr = typeRes?.content?.takeIf { it.isNotBlank() } ?: zoneName
 
-            val (rawTemp, tempRoot) = sysfsReader.readLong("$zonePath/temp")
-            if (tempRoot) usedRoot = true
+            val tempRes = batch["$zonePath/temp"]
+            if (tempRes?.usedRoot == true) usedRoot = true
+            val rawTemp = tempRes?.content?.trim()?.toLongOrNull()
 
-            val modeRes = sysfsReader.readText("$zonePath/mode")
-            if (modeRes.usedRoot) usedRoot = true
+            val modeRes = batch["$zonePath/mode"]
+            if (modeRes?.usedRoot == true) usedRoot = true
 
-            val policyRes = sysfsReader.readText("$zonePath/policy")
-            if (policyRes.usedRoot) usedRoot = true
+            val policyRes = batch["$zonePath/policy"]
+            if (policyRes?.usedRoot == true) usedRoot = true
 
             val category = ThermalParser.classifyZone(typeStr)
             val parsed = rawTemp?.let { ThermalParser.parseTemperatureCelsius(it) }
@@ -60,8 +66,8 @@ class ThermalDataSource(
                 temperatureC = parsed?.celsius,
                 rawValue = rawTemp,
                 detectedUnit = parsed?.detectedUnit ?: "N/A",
-                mode = modeRes.content,
-                policy = policyRes.content,
+                mode = modeRes?.content,
+                policy = policyRes?.content,
                 source = sysfsReader.resolveSource(DataSourceOrigin.SYSFS_THERMAL, usedRoot),
                 severity = severity
             )

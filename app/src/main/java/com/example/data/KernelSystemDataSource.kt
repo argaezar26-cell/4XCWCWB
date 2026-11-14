@@ -3,6 +3,7 @@ package com.example.data
 import android.os.Build
 import com.example.domain.KernelSystemInfo
 import com.example.domain.RootStatus
+import com.example.root.RootProbeResult
 import com.example.root.RootShellManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -15,11 +16,30 @@ class KernelSystemDataSource(
     suspend fun readKernelSystemInfo(
         availableGovernors: List<String>,
         availableFrequenciesMhz: List<Double>,
+        allowRootProbe: Boolean = false,
         forceRootProbe: Boolean = false
     ): KernelSystemInfo = withContext(Dispatchers.IO) {
-        val rootProbe = rootShellManager.probeRootAccess(forceRefresh = forceRootProbe)
+        val rootProbe = when {
+            forceRootProbe || (allowRootProbe && rootShellManager.cachedStatus == null) -> {
+                rootShellManager.probeRootAccess(forceRefresh = forceRootProbe)
+            }
+            rootShellManager.cachedStatus != null -> {
+                RootProbeResult(
+                    status = rootShellManager.cachedStatus!!,
+                    detail = rootShellManager.cachedProbeDetail,
+                    magiskVersion = rootShellManager.cachedMagiskVersion
+                )
+            }
+            else -> {
+                RootProbeResult(
+                    status = RootStatus.ROOT_NOT_FOUND,
+                    detail = "Checking root access...",
+                    magiskVersion = null
+                )
+            }
+        }
 
-        val procVersion = sysfsReader.readText("/proc/version").content
+        val procVersion = sysfsReader.readText("/proc/version", allowRootFallback = false).content
         val osVersion = System.getProperty("os.version") ?: "Unavailable"
 
         val selinuxStatus = readSelinuxStatus(rootProbe.status)
@@ -54,32 +74,52 @@ class KernelSystemDataSource(
         )
     }
 
+    @Volatile
+    private var cachedSelinuxStatus: String? = null
+
     private suspend fun readSelinuxStatus(rootStatus: RootStatus): String {
         val direct = sysfsReader.readDirect("/sys/fs/selinux/enforce")
         when (direct) {
             "1" -> return "Enforcing"
             "0" -> return "Permissive"
         }
+        cachedSelinuxStatus?.let { return it }
         if (rootStatus == RootStatus.ROOT_AVAILABLE) {
             val res = rootShellManager.executeAllowlisted("getenforce")
             if (res.success && !res.output.isNullOrBlank()) {
-                return res.output.trim()
+                val status = res.output.trim()
+                cachedSelinuxStatus = status
+                return status
             }
         }
         return "Restricted / Unavailable"
     }
 
+    @Volatile
+    private var cachedThermalConfig: String? = null
+    @Volatile
+    private var thermalConfigProbed: Boolean = false
+
     private suspend fun readThermalConfigPreview(rootStatus: RootStatus): String? {
+        if (thermalConfigProbed && cachedThermalConfig != null) return cachedThermalConfig
         val candidates = listOf(
             "/vendor/etc/thermal-engine.conf",
             "/vendor/etc/thermal-engine-8940.conf",
             "/system/etc/thermal-engine.conf"
         )
+        val batch = if (rootStatus == RootStatus.ROOT_AVAILABLE) {
+            thermalConfigProbed = true
+            sysfsReader.preloadBatchForRoot(candidates)
+        } else {
+            emptyMap()
+        }
         for (path in candidates) {
-            val res = sysfsReader.readText(path, allowRootFallback = (rootStatus == RootStatus.ROOT_AVAILABLE))
-            if (!res.content.isNullOrBlank()) {
-                val lines = res.content.lineSequence().take(18).joinToString("\n")
-                return "[$path]\n$lines"
+            val content = sysfsReader.readDirect(path) ?: batch[path]?.content
+            if (!content.isNullOrBlank()) {
+                val lines = content.lineSequence().take(18).joinToString("\n")
+                val preview = "[$path]\n$lines"
+                cachedThermalConfig = preview
+                return preview
             }
         }
         return null

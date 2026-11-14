@@ -11,6 +11,7 @@ import com.example.domain.ThermalParser
 import com.example.domain.UnitConverter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.microedition.khronos.egl.EGL10
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.egl.EGLContext
@@ -31,15 +32,18 @@ class CpuGpuDataSource(
     private var cachedGlRenderer: Pair<String?, String?>? = null
 
     suspend fun readCpuTelemetry(): CpuTelemetry = withContext(Dispatchers.IO) {
-        val cpuInfoRes = sysfsReader.readText("/proc/cpuinfo")
-        val (modelName, hardwarePlatform, architecture) = CpuFreqParser.parseCpuInfo(cpuInfoRes.content)
+        val procBatch = sysfsReader.preloadBatchForRoot(
+            listOf("/proc/cpuinfo", "/proc/stat", "/proc/loadavg")
+        )
+        val cpuInfoRes = procBatch["/proc/cpuinfo"]
+        val (modelName, hardwarePlatform, architecture) = CpuFreqParser.parseCpuInfo(cpuInfoRes?.content)
 
-        val statRes = sysfsReader.readText("/proc/stat")
-        val currProcStat = CpuFreqParser.parseProcStat(statRes.content)
+        val statRes = procBatch["/proc/stat"]
+        val currProcStat = CpuFreqParser.parseProcStat(statRes?.content)
         val totalUtil = CpuFreqParser.computeUtilizationPercent(previousProcStat["cpu"], currProcStat["cpu"])
 
-        val loadAvgRes = sysfsReader.readText("/proc/loadavg")
-        val loadTokens = loadAvgRes.content?.trim()?.split(Regex("\\s+")) ?: emptyList()
+        val loadAvgRes = procBatch["/proc/loadavg"]
+        val loadTokens = loadAvgRes?.content?.trim()?.split(Regex("\\s+")) ?: emptyList()
         val load1 = loadTokens.getOrNull(0)?.toDoubleOrNull()
         val load5 = loadTokens.getOrNull(1)?.toDoubleOrNull()
         val load15 = loadTokens.getOrNull(2)?.toDoubleOrNull()
@@ -58,30 +62,47 @@ class CpuGpuDataSource(
         }
         val coreIndices = if (discoveredIndices.isNotEmpty()) discoveredIndices else (0 until totalCores).toList()
 
+        val cpuFiles = listOf(
+            "cpufreq/scaling_cur_freq",
+            "cpufreq/scaling_min_freq",
+            "cpufreq/scaling_max_freq",
+            "cpufreq/cpuinfo_max_freq",
+            "cpufreq/scaling_governor",
+            "cpufreq/scaling_available_governors",
+            "cpufreq/scaling_available_frequencies"
+        )
+        val cpuPaths = buildList {
+            coreIndices.forEach { idx ->
+                if (idx > 0) add("$cpuBaseDir/cpu$idx/online")
+                cpuFiles.forEach { f -> add("$cpuBaseDir/cpu$idx/$f") }
+            }
+        }
+        val cpuBatch = sysfsReader.preloadBatchForRoot(cpuPaths)
+
         val allGovernors = LinkedHashSet<String>()
         val allFrequencies = LinkedHashSet<Double>()
-        var anyRootUsed = cpuInfoRes.usedRoot || statRes.usedRoot
+        var anyRootUsed = cpuInfoRes?.usedRoot == true || statRes?.usedRoot == true
 
         val coreList = coreIndices.map { index ->
             val corePath = "$cpuBaseDir/cpu$index"
             val onlineVal = if (index == 0) {
                 true
             } else {
-                val (onlineRaw, r) = sysfsReader.readLong("$corePath/online")
-                if (r) anyRootUsed = true
-                onlineRaw?.let { it == 1L }
+                val res = cpuBatch["$corePath/online"]
+                if (res?.usedRoot == true) anyRootUsed = true
+                res?.content?.trim()?.toLongOrNull()?.let { it == 1L }
             }
 
             val cpufreqPath = "$corePath/cpufreq"
             var coreUsedRoot = false
 
-            suspend fun readFreq(file: String): Double? {
-                val (raw, usedRoot) = sysfsReader.readLong("$cpufreqPath/$file")
-                if (usedRoot) {
+            fun readFreq(file: String): Double? {
+                val res = cpuBatch["$cpufreqPath/$file"] ?: return null
+                if (res.usedRoot) {
                     coreUsedRoot = true
                     anyRootUsed = true
                 }
-                return raw?.let { UnitConverter.frequencyToMhz(it)?.value }
+                return res.content?.trim()?.toLongOrNull()?.let { UnitConverter.frequencyToMhz(it)?.value }
             }
 
             val curFreq = readFreq("scaling_cur_freq")
@@ -89,19 +110,19 @@ class CpuGpuDataSource(
             val maxFreq = readFreq("scaling_max_freq")
             val hwMaxFreq = readFreq("cpuinfo_max_freq")
 
-            val govRes = sysfsReader.readText("$cpufreqPath/scaling_governor")
-            if (govRes.usedRoot) {
+            val govRes = cpuBatch["$cpufreqPath/scaling_governor"]
+            if (govRes?.usedRoot == true) {
                 coreUsedRoot = true
                 anyRootUsed = true
             }
 
-            val availGovRes = sysfsReader.readText("$cpufreqPath/scaling_available_governors")
-            if (availGovRes.usedRoot) anyRootUsed = true
-            allGovernors.addAll(CpuFreqParser.parseSpaceSeparatedTokens(availGovRes.content))
+            val availGovRes = cpuBatch["$cpufreqPath/scaling_available_governors"]
+            if (availGovRes?.usedRoot == true) anyRootUsed = true
+            allGovernors.addAll(CpuFreqParser.parseSpaceSeparatedTokens(availGovRes?.content))
 
-            val availFreqRes = sysfsReader.readText("$cpufreqPath/scaling_available_frequencies")
-            if (availFreqRes.usedRoot) anyRootUsed = true
-            allFrequencies.addAll(CpuFreqParser.parseFrequencyListMhz(availFreqRes.content))
+            val availFreqRes = cpuBatch["$cpufreqPath/scaling_available_frequencies"]
+            if (availFreqRes?.usedRoot == true) anyRootUsed = true
+            allFrequencies.addAll(CpuFreqParser.parseFrequencyListMhz(availFreqRes?.content))
 
             val coreKey = "cpu$index"
             val coreUtil = CpuFreqParser.computeUtilizationPercent(
@@ -116,7 +137,7 @@ class CpuGpuDataSource(
                 minFreqMhz = minFreq,
                 maxFreqMhz = maxFreq,
                 hardwareMaxFreqMhz = hwMaxFreq,
-                governor = govRes.content?.takeIf { it.isNotBlank() },
+                governor = govRes?.content?.takeIf { it.isNotBlank() },
                 utilizationPercent = coreUtil,
                 source = sysfsReader.resolveSource(DataSourceOrigin.SYSFS_CPU, coreUsedRoot)
             )
@@ -143,33 +164,37 @@ class CpuGpuDataSource(
     }
 
     suspend fun readGpuTelemetry(): GpuTelemetry = withContext(Dispatchers.IO) {
-        val (glRenderer, glVendor) = getGlInfo()
+        val (glRenderer, glVendor) = withTimeoutOrNull(800L) { getGlInfo() } ?: (null to null)
         val glEsVersion = activityManager?.deviceConfigurationInfo?.glEsVersion
 
-        // Primary probe: Qualcomm Adreno KGSL node
+        // Primary probe: Qualcomm Adreno KGSL node (batched)
         val kgslPath = "/sys/class/kgsl/kgsl-3d0"
-        val (kgslClockRaw, kgslRoot1) = sysfsReader.readLong("$kgslPath/gpuclk")
-        val (kgslMaxRaw, kgslRoot2) = sysfsReader.readLong("$kgslPath/max_gpuclk")
-        val (kgslMinRaw, kgslRoot3) = sysfsReader.readLong("$kgslPath/min_gpuclk")
-        val kgslBusyRes = sysfsReader.readText("$kgslPath/gpubusy")
-        val kgslModelRes = sysfsReader.readText("$kgslPath/gpu_model")
-        val kgslAvailRes = sysfsReader.readText("$kgslPath/gpu_available_frequencies")
-        val (kgslTempRaw, kgslTempRoot) = sysfsReader.readLong("$kgslPath/temp")
-        val kgslGovRes = sysfsReader.readText("$kgslPath/devfreq/governor")
+        val kgslFiles = listOf(
+            "gpuclk", "max_gpuclk", "min_gpuclk", "gpubusy",
+            "gpu_model", "gpu_available_frequencies", "temp", "devfreq/governor"
+        )
+        val kgslBatch = sysfsReader.preloadBatchForRoot(kgslFiles.map { "$kgslPath/$it" })
 
-        val hasKgsl = kgslClockRaw != null || kgslMaxRaw != null || kgslBusyRes.content != null || kgslModelRes.content != null
+        val kgslClockRaw = kgslBatch["$kgslPath/gpuclk"]?.content?.toLongOrNull()
+        val kgslMaxRaw = kgslBatch["$kgslPath/max_gpuclk"]?.content?.toLongOrNull()
+        val kgslMinRaw = kgslBatch["$kgslPath/min_gpuclk"]?.content?.toLongOrNull()
+        val kgslBusyRes = kgslBatch["$kgslPath/gpubusy"]
+        val kgslModelRes = kgslBatch["$kgslPath/gpu_model"]
+        val kgslAvailRes = kgslBatch["$kgslPath/gpu_available_frequencies"]
+        val kgslTempRaw = kgslBatch["$kgslPath/temp"]?.content?.toLongOrNull()
+        val kgslGovRes = kgslBatch["$kgslPath/devfreq/governor"]
+
+        val hasKgsl = kgslClockRaw != null || kgslMaxRaw != null || kgslBusyRes?.content != null || kgslModelRes?.content != null
 
         if (hasKgsl) {
-            val usedRoot = kgslRoot1 || kgslRoot2 || kgslRoot3 || kgslBusyRes.usedRoot ||
-                kgslModelRes.usedRoot || kgslAvailRes.usedRoot || kgslTempRoot || kgslGovRes.usedRoot
-
+            val usedRoot = kgslBatch.values.any { it.usedRoot }
             val curMhz = kgslClockRaw?.let { UnitConverter.frequencyToMhz(it)?.value }
             val maxMhz = kgslMaxRaw?.let { UnitConverter.frequencyToMhz(it)?.value }
             val minMhz = kgslMinRaw?.let { UnitConverter.frequencyToMhz(it)?.value }
-            val util = parseKgslBusy(kgslBusyRes.content)
+            val util = parseKgslBusy(kgslBusyRes?.content)
             val tempC = kgslTempRaw?.let { ThermalParser.parseTemperatureCelsius(it)?.celsius }
-            val availMhz = CpuFreqParser.parseFrequencyListMhz(kgslAvailRes.content)
-            val name = glRenderer ?: kgslModelRes.content?.takeIf { it.isNotBlank() } ?: "Qualcomm Adreno (KGSL)"
+            val availMhz = CpuFreqParser.parseFrequencyListMhz(kgslAvailRes?.content)
+            val name = glRenderer ?: kgslModelRes?.content?.takeIf { it.isNotBlank() } ?: "Qualcomm Adreno (KGSL)"
 
             return@withContext GpuTelemetry(
                 gpuName = name,
@@ -179,7 +204,7 @@ class CpuGpuDataSource(
                 maxFreqMhz = maxMhz,
                 minFreqMhz = minMhz,
                 utilizationPercent = util,
-                governor = kgslGovRes.content?.takeIf { it.isNotBlank() },
+                governor = kgslGovRes?.content?.takeIf { it.isNotBlank() },
                 temperatureC = tempC,
                 availableFrequenciesMhz = availMhz,
                 sysfsNodePath = kgslPath,
@@ -198,12 +223,16 @@ class CpuGpuDataSource(
 
         if (gpuNodeName != null) {
             val nodePath = "$devfreqBase/$gpuNodeName"
-            val (curRaw, r1) = sysfsReader.readLong("$nodePath/cur_freq")
-            val (maxRaw, r2) = sysfsReader.readLong("$nodePath/max_freq")
-            val (minRaw, r3) = sysfsReader.readLong("$nodePath/min_freq")
-            val govRes = sysfsReader.readText("$nodePath/governor")
-            val availRes = sysfsReader.readText("$nodePath/available_frequencies")
-            val usedRoot = devDirRoot || r1 || r2 || r3 || govRes.usedRoot || availRes.usedRoot
+            val devBatch = sysfsReader.preloadBatchForRoot(
+                listOf("cur_freq", "max_freq", "min_freq", "governor", "available_frequencies")
+                    .map { "$nodePath/$it" }
+            )
+            val curRaw = devBatch["$nodePath/cur_freq"]?.content?.toLongOrNull()
+            val maxRaw = devBatch["$nodePath/max_freq"]?.content?.toLongOrNull()
+            val minRaw = devBatch["$nodePath/min_freq"]?.content?.toLongOrNull()
+            val govRes = devBatch["$nodePath/governor"]
+            val availRes = devBatch["$nodePath/available_frequencies"]
+            val usedRoot = devDirRoot || devBatch.values.any { it.usedRoot }
 
             return@withContext GpuTelemetry(
                 gpuName = glRenderer ?: gpuNodeName,
@@ -213,17 +242,22 @@ class CpuGpuDataSource(
                 maxFreqMhz = maxRaw?.let { UnitConverter.frequencyToMhz(it)?.value },
                 minFreqMhz = minRaw?.let { UnitConverter.frequencyToMhz(it)?.value },
                 utilizationPercent = null,
-                governor = govRes.content?.takeIf { it.isNotBlank() },
+                governor = govRes?.content?.takeIf { it.isNotBlank() },
                 temperatureC = null,
-                availableFrequenciesMhz = CpuFreqParser.parseFrequencyListMhz(availRes.content),
+                availableFrequenciesMhz = CpuFreqParser.parseFrequencyListMhz(availRes?.content),
                 sysfsNodePath = nodePath,
                 source = sysfsReader.resolveSource(DataSourceOrigin.SYSFS_DEVFREQ, usedRoot),
                 isSysfsAvailable = true
             )
         }
 
-        // OpenGL ES driver fallback only (never invent sysfs clock frequencies)
-        GpuTelemetry(
+        fallbackGpuTelemetry()
+    }
+
+    fun fallbackGpuTelemetry(): GpuTelemetry {
+        val glEsVersion = activityManager?.deviceConfigurationInfo?.glEsVersion
+        val (glRenderer, glVendor) = cachedGlRenderer ?: (null to null)
+        return GpuTelemetry(
             gpuName = glRenderer ?: "Unavailable",
             vendor = glVendor,
             glEsVersion = glEsVersion,

@@ -57,6 +57,7 @@ class HardwareLabViewModel(
 ) : AndroidViewModel(application) {
 
     private val repository: HardwareRepository = HardwareRepositoryImpl(application.applicationContext)
+    private val snapshotMutex = kotlinx.coroutines.sync.Mutex()
 
     private val _uiState = MutableStateFlow(HardwareLabUiState())
     val uiState: StateFlow<HardwareLabUiState> = _uiState.asStateFlow()
@@ -66,7 +67,20 @@ class HardwareLabViewModel(
     private val maxHistoryPoints = 60
 
     init {
-        startOrRestartPolling()
+        viewModelScope.launch {
+            collectAndPublishSnapshot(allowRootProbe = false, forceRootProbe = false)
+            startOrRestartPolling()
+        }
+        viewModelScope.launch {
+            delay(300L)
+            _uiState.update { it.copy(isProbingRoot = true) }
+            try {
+                repository.reProbeRoot()
+                collectAndPublishSnapshot(allowRootProbe = true, forceRootProbe = false)
+            } finally {
+                _uiState.update { it.copy(isProbingRoot = false) }
+            }
+        }
     }
 
     fun selectPage(page: LabPage) {
@@ -134,7 +148,7 @@ class HardwareLabViewModel(
 
     fun refreshNow() {
         viewModelScope.launch {
-            collectAndPublishSnapshot(forceRootProbe = false)
+            collectAndPublishSnapshot(allowRootProbe = false, forceRootProbe = false)
         }
     }
 
@@ -143,7 +157,7 @@ class HardwareLabViewModel(
             _uiState.update { it.copy(isProbingRoot = true) }
             try {
                 repository.reProbeRoot()
-                collectAndPublishSnapshot(forceRootProbe = false)
+                collectAndPublishSnapshot(allowRootProbe = true, forceRootProbe = false)
             } finally {
                 _uiState.update { it.copy(isProbingRoot = false) }
             }
@@ -162,7 +176,7 @@ class HardwareLabViewModel(
                         benchmarkMessage = "4 MB cache-dir test completed in ${res.durationMs} ms"
                     )
                 }
-                collectAndPublishSnapshot(forceRootProbe = false)
+                collectAndPublishSnapshot(allowRootProbe = false, forceRootProbe = false)
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -214,20 +228,27 @@ class HardwareLabViewModel(
         pollingJob?.cancel()
         pollingJob = viewModelScope.launch {
             while (isActive) {
+                val intervalMs = _uiState.value.refreshInterval.seconds * 1000L
+                delay(intervalMs)
                 val state = _uiState.value
                 val shouldPoll = !state.isPaused && (state.isAppInForeground || state.backgroundMonitoringEnabled)
                 if (!shouldPoll) break
 
-                collectAndPublishSnapshot(forceRootProbe = false)
-                val intervalMs = _uiState.value.refreshInterval.seconds * 1000L
-                delay(intervalMs)
+                collectAndPublishSnapshot(allowRootProbe = false, forceRootProbe = false)
             }
         }
     }
 
-    private suspend fun collectAndPublishSnapshot(forceRootProbe: Boolean) {
+    private suspend fun collectAndPublishSnapshot(
+        allowRootProbe: Boolean,
+        forceRootProbe: Boolean
+    ) {
+        snapshotMutex.lock()
         try {
-            val snapshot = repository.collectSnapshot(forceRootProbe = forceRootProbe)
+            val snapshot = repository.collectSnapshot(
+                allowRootProbe = allowRootProbe,
+                forceRootProbe = forceRootProbe
+            )
             val ts = snapshot.timestampMs
             _uiState.update { prev ->
                 val h = prev.history
@@ -273,6 +294,8 @@ class HardwareLabViewModel(
                     lastError = e.message ?: "Telemetry read error"
                 )
             }
+        } finally {
+            snapshotMutex.unlock()
         }
     }
 
