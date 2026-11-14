@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Redmi 4X Hardware Lab</string>
+    <string name="app_tagline">DEEP HARDWARE MONITORING &amp; DIAGNOSTICS</string>
+    <string name="monitoring_channel_name">Hardware Telemetry Monitor</string>
+    <string name="monitoring_channel_desc">Persistent notification while background hardware monitoring is active.</string>
+    <string name="monitoring_notification_title">Redmi 4X Hardware Lab Active</string>
+</resources>

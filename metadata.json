@@ -1,0 +1,6 @@
+{
+  "name": "Redmi 4X Hardware Lab",
+  "description": "Deep hardware monitoring and kernel diagnostic tool for Android devices (optimized for Redmi 4X Santoni) with real-time sysfs, BatteryManager, thermal, CPU/GPU, memory, storage, sensor, and read-only root telemetry.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
