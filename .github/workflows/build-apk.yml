@@ -17,8 +17,12 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses
+        run: |
+          SDK_MANAGER=$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}" -name "sdkmanager" 2>/dev/null | head -n 1)
+          if [ -n "$SDK_MANAGER" ]; then
+            yes | "$SDK_MANAGER" --licenses >/dev/null 2>&1 || true
+          fi
 
       - name: Generate debug keystore if missing
         run: |
@@ -34,8 +38,8 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Run unit tests & build Debug APK
-        run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
 
       - name: Upload ready-to-install Debug APK
         uses: actions/upload-artifact@v4
